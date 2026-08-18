@@ -1149,11 +1149,342 @@ function parseNumber(val) {
 </html>
 ```
 
+### Реализация логов
+
+```sql
+USE [GROSVER_GROUP]
+GO
+
+IF OBJECT_ID('dbo.SP_GetPlanSnapshotLogs', 'P') IS NOT NULL
+    DROP PROCEDURE dbo.SP_GetPlanSnapshotLogs;
+GO
+
+SET ANSI_NULLS ON
+GO
+SET QUOTED_IDENTIFIER ON
+GO
+
+CREATE PROCEDURE [dbo].[SP_GetPlanSnapshotLogs]
+AS
+BEGIN
+    SET NOCOUNT ON;
+
+    -- Группируем данные, чтобы получить список уникальных версий
+    SELECT 
+        MAX(Upload_Date) AS [Дата_Создания], 
+        Report_Month AS [Месяц], 
+        Version_Num AS [Версия] 
+    FROM [dbo].[GC_PLAN_SNAPSHOT] 
+    GROUP BY Report_Month, Version_Num 
+    ORDER BY Report_Month DESC, Version_Num DESC;
+END
+GO
+```
+
+Обновленный код
+
+```js
+var API_URL = "https://meridian-sap-api.shares.zrok.io/api/raw-query/exec";
+var API_OPTIONS = {
+  "method": "post",
+  "contentType": "application/json",
+  "muteHttpExceptions": true,
+  "headers": { "skip_zrok_interstitial": "true" }
+};
+
+function onOpen() {
+  var ui = SpreadsheetApp.getUi();
+  ui.createMenu('🏭 Производство')
+    .addItem('📥 1. Загрузить Аналитику (План/Факт)', 'showAnalyticsDialog')
+    .addItem('📈 2. Детальный Дашборд (По дням)', 'buildDashboard')
+    .addItem('📊 3. Общий Дашборд (Итоги + График)', 'buildAggregatedDashboard')
+    .addSeparator()
+    .addItem('📸 Создать новую версию плана (Snapshot)', 'createNewSnapshot')
+    .addItem('📖 Загрузить историю версий (Логи из БД)', 'fetchVersionLogs') // НОВАЯ КНОПКА
+    .addToUi();
+}
+
+function showAnalyticsDialog() {
+  var html = HtmlService.createHtmlOutputFromFile('Dialog')
+      .setWidth(350).setHeight(400).setTitle('Загрузка Аналитики');
+  SpreadsheetApp.getUi().showModalDialog(html, 'Параметры выгрузки');
+}
+
+function fetchAnalyticsData(params) {
+  var query = "EXEC [dbo].[SP_GetProductionAnalytics] @DateFrom = '" + params.dateFrom + "', @DateTo = '" + params.dateTo + "', @PlanVersion = " + (params.version || "NULL");
+  
+  var options = Object.assign({}, API_OPTIONS);
+  options.payload = JSON.stringify({ "query": query });
+
+  var response = UrlFetchApp.fetch(API_URL, options);
+  var json = JSON.parse(response.getContentText());
+  
+  if (!json.success || !json.data) {
+    throw new Error("Ответ от SQL Server:\n" + (json.error || json.message || response.getContentText()));
+  }
+  
+  var data = json.data;
+  if(data.length === 0) return "Нет данных за этот период.";
+
+  var sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName("Аналитика_Данные");
+  if (!sheet) sheet = SpreadsheetApp.getActiveSpreadsheet().insertSheet("Аналитика_Данные");
+  sheet.clear();
+
+  var headers = ["Тип Данных", "Дата", "Смена", "Станок", "Заказ", "Позиция", "Операция", "Артикул", "Версия Плана", "План Шт", "План Мин", "Факт Шт", "Факт Мин", "Прерывания Мин"];
+  var rows = [headers];
+  
+  for (var i = 0; i < data.length; i++) {
+    rows.push([
+      data[i]["Тип Данных"], formatSqlDateRegex(data[i]["Дата"]), data[i]["Смена"], data[i]["Станок"],
+      data[i]["Заказ"] || "", data[i]["Позиция"] || "", data[i]["Операция"] || "", data[i]["Артикул"] || "",
+      data[i]["Версия_Плана"],
+      parseNumber(data[i]["План_Шт"]), parseNumber(data[i]["План_Время_Мин"]),
+      parseNumber(data[i]["Факт_Шт"]), parseNumber(data[i]["Факт_Время_Мин"]),
+      parseNumber(data[i]["Прерывания_Мин"])
+    ]);
+  }
+
+  sheet.getRange(1, 1, rows.length, rows[0].length).setValues(rows);
+  sheet.getRange("A1:N1").setFontWeight("bold").setBackground("#d9ead3");
+  sheet.getRange(2, 2, rows.length-1, 1).setNumberFormat("dd.MM.yyyy");
+  sheet.getRange(2, 10, rows.length-1, 5).setNumberFormat("0.00");
+
+  return "Успешно загружено строк: " + (rows.length - 1);
+}
+
+function createNewSnapshot() {
+  var ui = SpreadsheetApp.getUi();
+  var response = ui.prompt("Снимок Плана", "На сколько дней вперед сохранить план? (по умолчанию 30):", ui.ButtonSet.OK_CANCEL);
+  if (response.getSelectedButton() !== ui.Button.OK) return;
+  var days = parseInt(response.getResponseText().trim()) || 30;
+
+  var query = "EXEC [dbo].[SP_AddPlanSnapshot] @DaysAhead = " + days;
+  var options = Object.assign({}, API_OPTIONS);
+  options.payload = JSON.stringify({ "query": query });
+
+  try {
+    var res = UrlFetchApp.fetch(API_URL, options);
+    var json = JSON.parse(res.getContentText());
+    if (json.success && json.data && json.data.length > 0) {
+      
+      var newVersion = json.data[0].NewVersion;
+      var month = formatSqlDateRegex(json.data[0].Month);
+      var message = json.data[0].Message;
+      
+      // =====================================
+      // ПИШЕМ ЛОГ В ТАБЛИЦУ
+      // =====================================
+      var ss = SpreadsheetApp.getActiveSpreadsheet();
+      var logSheet = ss.getSheetByName("📖 Логи Версий");
+      if (!logSheet) {
+        logSheet = ss.insertSheet("📖 Логи Версий");
+        logSheet.appendRow(["Дата и время выгрузки", "Отчетный Месяц", "Доступная Версия (План)", "Горизонт"]);
+        logSheet.getRange("A1:D1").setFontWeight("bold").setBackground("#fff2cc");
+        logSheet.setFrozenRows(1);
+      }
+      
+      // Получаем текущее время
+      var timestamp = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), "dd.MM.yyyy HH:mm:ss");
+      logSheet.appendRow([timestamp, month, newVersion, days + " дней"]);
+      logSheet.autoResizeColumns(1, 4);
+      // =====================================
+
+      ui.alert("Успех!", message + "\nМесяц: " + month + "\nЗапись добавлена в логи.", ui.ButtonSet.OK);
+    }
+  } catch (e) { ui.alert("Критическая ошибка: " + e.toString()); }
+}
+
+// ---------------------------------------------------------
+// ДАШБОРД 1: ДЕТАЛЬНЫЙ (Разбор смен и станков)
+// ---------------------------------------------------------
+function buildDashboard() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var sourceSheet = ss.getSheetByName("Аналитика_Данные");
+  if (!sourceSheet) { SpreadsheetApp.getUi().alert("Сначала загрузите данные!"); return; }
+
+  var dashName = "📈 Детальный Дашборд";
+  var dashSheet = ss.getSheetByName(dashName);
+  if (dashSheet) ss.deleteSheet(dashSheet);
+  
+  dashSheet = ss.insertSheet(dashName);
+  ss.setActiveSheet(dashSheet);
+  ss.moveActiveSheet(1); 
+
+  var sourceRange = sourceSheet.getDataRange();
+  var pivotTable = dashSheet.getRange('A3').createPivotTable(sourceRange);
+
+  pivotTable.addRowGroup(2).showTotals(true);  // Дата
+  pivotTable.addRowGroup(3).showTotals(true);  // Смена
+  pivotTable.addRowGroup(4).showTotals(true);  // Станок
+  pivotTable.addRowGroup(8).showTotals(false); // Деталь
+
+  pivotTable.addPivotValue(10, SpreadsheetApp.PivotTableSummarizeFunction.SUM).setDisplayName('План (шт)');
+  pivotTable.addPivotValue(12, SpreadsheetApp.PivotTableSummarizeFunction.SUM).setDisplayName('Факт (шт)');
+  
+  try {
+    var pf = pivotTable.addCalculatedPivotValue('% Выполн.', "=IFERROR('Факт Шт' / 'План Шт'; 0)");
+    pf.setFormulaSyntax(SpreadsheetApp.PivotTableCalculatedValueFormulaSyntax.CUSTOM);
+  } catch(e) { Logger.log(e); }
+
+  pivotTable.addPivotValue(11, SpreadsheetApp.PivotTableSummarizeFunction.SUM).setDisplayName('План (мин)');
+  pivotTable.addPivotValue(13, SpreadsheetApp.PivotTableSummarizeFunction.SUM).setDisplayName('Факт (мин)');
+  pivotTable.addPivotValue(14, SpreadsheetApp.PivotTableSummarizeFunction.SUM).setDisplayName('Простой (мин)');
+
+  dashSheet.getRange("A1").setValue("Производственный Дашборд: Детальный (План / Факт / Простой)")
+           .setFontSize(14).setFontWeight("bold").setFontColor("#1a73e8");
+  dashSheet.getRange("A2").setValue("💡 Разворачивайте станок (+), чтобы увидеть детализацию по артикулам")
+           .setFontStyle("italic").setFontColor("#5f6368");
+
+  dashSheet.setColumnWidth(1, 100); dashSheet.setColumnWidth(2, 70);
+  dashSheet.setColumnWidth(3, 110); dashSheet.setColumnWidth(4, 150);
+  dashSheet.getRange("E:J").setNumberFormat('[=0]"";#,##0.##'); 
+  dashSheet.getRange("G:G").setNumberFormat('[=0]"";0%'); 
+  dashSheet.setFrozenRows(3);
+}
+
+// ---------------------------------------------------------
+// ДАШБОРД 2: ОБЩИЙ АГРЕГИРОВАННЫЙ (Итоги + График)
+// ---------------------------------------------------------
+function buildAggregatedDashboard() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var sourceSheet = ss.getSheetByName("Аналитика_Данные");
+  if (!sourceSheet) { SpreadsheetApp.getUi().alert("Сначала загрузите данные!"); return; }
+
+  var dashName = "📊 Общий Дашборд";
+  var dashSheet = ss.getSheetByName(dashName);
+  if (dashSheet) ss.deleteSheet(dashSheet);
+  
+  dashSheet = ss.insertSheet(dashName);
+  ss.setActiveSheet(dashSheet);
+  ss.moveActiveSheet(2); 
+
+  var sourceRange = sourceSheet.getDataRange();
+  var pivotTable = dashSheet.getRange('A3').createPivotTable(sourceRange);
+
+  // Иерархия: Деталь -> Заказ
+  pivotTable.addRowGroup(8).showTotals(true);  
+  pivotTable.addRowGroup(5).showTotals(false); 
+
+  pivotTable.addPivotValue(10, SpreadsheetApp.PivotTableSummarizeFunction.SUM).setDisplayName('Всего План (шт)');
+  pivotTable.addPivotValue(12, SpreadsheetApp.PivotTableSummarizeFunction.SUM).setDisplayName('Всего Факт (шт)');
+  
+  try {
+    var pf = pivotTable.addCalculatedPivotValue('% Выполн.', "=IFERROR('Факт Шт' / 'План Шт'; 0)");
+    pf.setFormulaSyntax(SpreadsheetApp.PivotTableCalculatedValueFormulaSyntax.CUSTOM);
+  } catch(e) { Logger.log(e); }
+
+  pivotTable.addPivotValue(11, SpreadsheetApp.PivotTableSummarizeFunction.SUM).setDisplayName('Всего План (мин)');
+  pivotTable.addPivotValue(13, SpreadsheetApp.PivotTableSummarizeFunction.SUM).setDisplayName('Всего Факт (мин)');
+  pivotTable.addPivotValue(14, SpreadsheetApp.PivotTableSummarizeFunction.SUM).setDisplayName('Всего Простой (мин)');
+
+  dashSheet.getRange("A1").setValue("Агрегированный Дашборд: Итоги за выбранный период")
+           .setFontSize(14).setFontWeight("bold").setFontColor("#b31412");
+  dashSheet.getRange("A2").setValue("💡 Разворачивайте Деталь (+), чтобы увидеть номера Заказов")
+           .setFontStyle("italic").setFontColor("#5f6368");
+
+  dashSheet.setColumnWidth(1, 200); dashSheet.setColumnWidth(2, 90);  
+  dashSheet.setColumnWidth(3, 110); dashSheet.setColumnWidth(4, 110); 
+  dashSheet.setColumnWidth(5, 100); dashSheet.setColumnWidth(6, 110); 
+  dashSheet.setColumnWidth(7, 110); dashSheet.setColumnWidth(8, 130); 
+
+  dashSheet.getRange("C:H").setNumberFormat('[=0]"";#,##0.##'); 
+  dashSheet.getRange("E:E").setNumberFormat('[=0]"";0%'); 
+  dashSheet.setFrozenRows(3);
+
+  // ==========================================
+  // ГЕНЕРАЦИЯ ДИАГРАММЫ (План vs Факт)
+  // ==========================================
+  SpreadsheetApp.flush(); // Применяем сводную таблицу к листу, чтобы получить высоту
+  var lastRow = dashSheet.getLastRow();
+  
+  if (lastRow > 4) { // Если есть данные, кроме заголовка
+    var chart = dashSheet.newChart()
+      .asColumnChart()
+      .addRange(dashSheet.getRange(3, 1, lastRow - 3, 1)) // Ось X: Артикулы (Колонка A)
+      .addRange(dashSheet.getRange(3, 3, lastRow - 3, 2)) // Серии: План Шт (C) и Факт Шт (D)
+      .setNumHeaders(1)
+      .setOption('title', 'Сравнение: План vs Факт по деталям')
+      .setOption('hAxis.title', 'Артикул')
+      .setOption('vAxis.title', 'Кол-во (шт)')
+      .setOption('legend', {position: 'top'})
+      .setOption('colors', ['#4285F4', '#34A853']) // Цвета: синий для плана, зеленый для факта
+      .setPosition(3, 10, 0, 0) // Размещаем справа от таблицы (в районе колонки J)
+      .setOption('width', 800)
+      .setOption('height', 450)
+      .build();
+      
+    dashSheet.insertChart(chart);
+  }
+}
+
+// Утилиты
+function formatSqlDateRegex(sqlDateStr) {
+  if (!sqlDateStr) return '';
+  var match = sqlDateStr.toString().match(/(\d{4})-(\d{2})-(\d{2})/);
+  return match ? match[3] + "." + match[2] + "." + match[1] : sqlDateStr;
+}
+
+function parseNumber(val) {
+  if (!val) return 0;
+  return parseFloat(val.toString().replace(',', '.')) || 0;
+}
+
+// Функция выгрузки логов напрямую из SQL Server
+// Функция выгрузки логов напрямую из SQL Server
+function fetchVersionLogs() {
+  var ui = SpreadsheetApp.getUi();
+  
+  // ИСПОЛЬЗУЕМ EXEC ДЛЯ ВЫЗОВА ПРОЦЕДУРЫ!
+  var query = "EXEC [dbo].[SP_GetPlanSnapshotLogs]";
+  
+  var options = Object.assign({}, API_OPTIONS);
+  options.payload = JSON.stringify({ "query": query });
+
+  try {
+    var res = UrlFetchApp.fetch(API_URL, options);
+    var json = JSON.parse(res.getContentText());
+    
+    if (!json.success || !json.data) {
+      throw new Error(json.error || json.message || res.getContentText());
+    }
+    
+    var data = json.data;
+    if (data.length === 0) {
+      ui.alert("В базе данных пока нет ни одной сохраненной версии плана.");
+      return;
+    }
+
+    var ss = SpreadsheetApp.getActiveSpreadsheet();
+    var logSheet = ss.getSheetByName("📖 Логи Версий");
+    if (!logSheet) logSheet = ss.insertSheet("📖 Логи Версий");
+    
+    logSheet.clear(); // Очищаем старое
+    
+    var rows = [["Дата и время выгрузки (в базе)", "Отчетный Месяц", "Доступная Версия (План)"]];
+    for (var i = 0; i < data.length; i++) {
+      var uploadDate = data[i]["Дата_Создания"] ? data[i]["Дата_Создания"].toString().replace('T', ' ').substring(0, 19) : "";
+      var reportMonth = formatSqlDateRegex(data[i]["Месяц"]);
+      
+      rows.push([uploadDate, reportMonth, data[i]["Версия"]]);
+    }
+    
+    logSheet.getRange(1, 1, rows.length, 3).setValues(rows);
+    logSheet.getRange("A1:C1").setFontWeight("bold").setBackground("#fff2cc");
+    logSheet.autoResizeColumns(1, 3);
+    
+    ui.alert("Логи успешно восстановлены из Базы Данных!");
+    
+  } catch (e) {
+    ui.alert("Ошибка загрузки логов: " + e.toString());
+  }
+}
+```
+
 # Получать коментарии наладчиков и операторов с телеграмм бота
 
-Есть бот который хранит коментарии наладчиков и орператор в течении смены (неисправности, другие нюансы работы)
+Есть бот который хранит коментарии наладчиков и ореператор в течении смены (неисправности, другие нюансы работы)
 
-Необходимо получать эти коментарии по данной детали, номеру документа, позиции и операции, имя оператора. Если они соподают то берем и выгружаем их в нужную ячейку в наш общий анализ. Думаю получать все отдельно а потмо уже агрегировать в нашей таблице.
+Необходимо получать эти коментарии по данной детали, номеру документа, позиции и операции, имя оператора. Если они соподают то берем и выгружаем их в нужную ячейку в наш общий анализ. Думаю получать все отдельно а потом уже агрегировать в нашей таблице. Создать получить коментарии он их выгружает в отдельную колонку, но по тем деталям что уже есть в аналитике данных. Далее нажимаем кнопку сформировать коментарии и он добовляет к текущим дащборду последней строчкой комментарии. Как и в детальном дашборде так и а общем.
 
 Как выглядит инфа в БД.
 
@@ -1224,5 +1555,196 @@ SELECT TOP (1000) [Id]
 Id	MachineCode	PartNumber	OperationNumber	Message	AuthorTelegramId	AuthorFullName	CreatedAt	OperationType	DocNumber	DocPosition
 1	M12	21010008317	60	Смещена сетка отверстий и торцевые грани в модели NX для получения соосности и симметричности. Размер после расточки 12.94 мм. Имеется бочкообразность размера 12.96, H8 около 0.01 мм. Нет резьбофрез по стали. Обработка с испорченными резьбофрезами. Фреза чистовая F8 был изменен в вылет. У метчика M8 на 0,75 выкрашена режущая кромка. Резьба фреза M2, не нарезана резьба вследствие поломки резьбы фрезы. Фрезерование с дна отверстия. Изменено направление от поверхности к дну отверстия. Уменьшена скорость резания и подача. обработка остановлена, изменена программа ЧПУ.	671190103	Влад	2026-08-17 10:40:14.9929816	Обработка	5104	60
 
+## Сформировали процедуру
+
+```sql
+USE [ChecklistBot]
+GO
+
+/****** Объект:  StoredProcedure [dbo].[SP_GetBotComments]    Дата создания скрипта: 18.08.2026 8:47:15 ******/ 
+SET ANSI_NULLS ON
+GO
+
+SET QUOTED_IDENTIFIER ON
+GO
 
 
+ALTER PROCEDURE [dbo].[SP_GetBotComments] AS
+BEGIN
+    SET NOCOUNT ON;
+    WITH AllLogs AS (
+        SELECT r.MachineCode, CAST(r.DocNumber AS NVARCHAR(50)) AS DocNumber, CAST(r.DocPosition AS NVARCHAR(50)) AS DocPosition, CAST(r.OperationNumber AS NVARCHAR(50)) AS OperationNumber,
+        CONCAT(N'🛠 [', FORMAT(r.CreatedAt, 'dd.MM HH:mm'), N' ', r.AuthorFullName, N'] Чек-лист: ', q.Text, N' - ', CASE WHEN a.IsOk = 1 THEN N'ОК' ELSE N'НЕ ОК' END, ISNULL(N' (' + a.Note + N')', N'')) AS LogText, r.CreatedAt
+        FROM [dbo].[ToolReports] r JOIN [dbo].[ToolReportAnswers] a ON r.Id = a.ReportId JOIN [dbo].[ToolQuestions] q ON a.QuestionId = q.Id
+        UNION ALL
+        SELECT c.MachineCode, CAST(c.DocNumber AS NVARCHAR(50)), CAST(c.DocPosition AS NVARCHAR(50)), CAST(c.OperationNumber AS NVARCHAR(50)),
+        CONCAT(N'💬 [', FORMAT(c.CreatedAt, 'dd.MM HH:mm'), N' ', c.AuthorFullName, N'] Коммент: ', c.Message), c.CreatedAt
+        FROM [dbo].[Checklists] c
+    )
+    SELECT RTRIM(LTRIM(MachineCode)) AS MachineCode, RTRIM(LTRIM(DocNumber)) AS DocNumber, RTRIM(LTRIM(DocPosition)) AS DocPosition, RTRIM(LTRIM(OperationNumber)) AS OperationNumber,
+    STRING_AGG(LogText, CHAR(10)) WITHIN GROUP (ORDER BY CreatedAt) AS FullComment
+    FROM AllLogs GROUP BY MachineCode, DocNumber, DocPosition, OperationNumber;
+END
+GO
+```
+
+## Создали новый роут на сервере
+
+```js
+//bot-query.controller.ts
+import { Controller, Post, Body, HttpException, HttpStatus } from '@nestjs/common';
+import { BotQueryService } from './bot-query.service';
+
+@Controller('api/bot-query')
+export class BotQueryController {
+  constructor(private readonly botQueryService: BotQueryService) {}
+
+  @Post('exec')
+  async executeExec(@Body() body: { query: string }) {
+    if (!body.query) throw new HttpException('Query is required', HttpStatus.BAD_REQUEST);
+    return this.botQueryService.executeExecString(body.query);
+  }
+}
+
+//bot-query.module.ts
+import { Module } from '@nestjs/common';
+import { BotQueryController } from './bot-query.controller';  
+import { BotQueryService } from './bot-query.service';         
+
+@Module({
+  controllers: [BotQueryController],
+  providers: [BotQueryService],
+  exports: [BotQueryService],
+})
+export class BotQueryModule {}
+
+//bot-query.service.ts
+import { Injectable, HttpException, HttpStatus, OnModuleInit, OnModuleDestroy } from '@nestjs/common';
+import * as sql from 'mssql';
+
+@Injectable()
+export class BotQueryService implements OnModuleInit, OnModuleDestroy {
+  private pool: sql.ConnectionPool | null = null;
+  private isInitializing = false;
+  private initPromise: Promise<sql.ConnectionPool> | null = null;
+
+  private readonly allowedPattern = /^\s*(EXEC|EXECUTE)\s+/i;
+  
+  // Список запрещенных слов 
+  private readonly forbiddenKeywords = [
+    'DROP', 'ALTER', 'CREATE', 'INSERT', 'UPDATE', 'DELETE',
+    'TRUNCATE', 'MERGE', 'GRANT', 'REVOKE',
+    'BACKUP', 'RESTORE', 'DBCC',
+  ];
+
+  async onModuleInit() {
+    await this.initializePool();
+  }
+
+  async onModuleDestroy() {
+    await this.closePool();
+  }
+
+  private async initializePool(): Promise<sql.ConnectionPool> {
+    if (this.pool && this.pool.connected) {
+      return this.pool;
+    }
+
+    if (this.isInitializing && this.initPromise) {
+      return this.initPromise;
+    }
+
+    this.isInitializing = true;
+    
+    this.initPromise = (async () => {
+      const config: sql.config = {
+        server: process.env.BOT_DB_SERVER || process.env.DB_SERVER,
+        database: process.env.BOT_DB_DATABASE || 'ChecklistBot',
+        user: process.env.BOT_DB_USER || process.env.DB_USER,
+        password: process.env.BOT_DB_PASSWORD || process.env.DB_PASSWORD,
+        port: parseInt(process.env.BOT_DB_PORT || '1433', 10),
+        options: {
+          encrypt: false,
+          trustServerCertificate: true,
+          enableArithAbort: true
+        },
+        pool: {
+          max: 10,
+          min: 2,
+          idleTimeoutMillis: 30000,
+          acquireTimeoutMillis: 10000,
+        }
+      };
+
+      // ИСПРАВЛЕНИЕ: Создаем полностью изолированный пул соединений
+      const localPool = new sql.ConnectionPool(config);
+      this.pool = await localPool.connect();
+      
+      console.log('✅ Bot Database pool connected (ISOLATED)');
+      return this.pool;
+    })();
+
+    try {
+      const pool = await this.initPromise;
+      return pool;
+    } finally {
+      this.isInitializing = false;
+      this.initPromise = null;
+    }
+  }
+
+  private async closePool(): Promise<void> {
+    if (this.pool) {
+      await this.pool.close();
+      this.pool = null;
+      console.log('🔴 Bot Database pool closed');
+    }
+  }
+
+  async executeExecString(execString: string): Promise<any> {
+    if (!execString || typeof execString !== 'string') {
+      throw new HttpException('EXEC string is required', HttpStatus.BAD_REQUEST);
+    }
+
+    if (!this.allowedPattern.test(execString)) {
+      throw new HttpException(
+        'String must start with EXEC or EXECUTE',
+        HttpStatus.BAD_REQUEST,
+      );
+    }
+
+    const upperString = execString.toUpperCase();
+    for (const keyword of this.forbiddenKeywords) {
+      const regex = new RegExp(`\\b${keyword}\\b`, 'i');
+      if (regex.test(upperString)) {
+        throw new HttpException(
+          `Keyword '${keyword}' is not allowed`,
+          HttpStatus.FORBIDDEN,
+        );
+      }
+    }
+
+    try {
+      const pool = await this.initializePool();
+      const result = await pool.request().query(execString);
+
+      return {
+        success: true,
+        data: result.recordset,
+        rowsAffected: result.rowsAffected?.[0] ?? 0,
+      };
+    } catch (error) {
+      throw new HttpException(
+        `EXEC execution failed: ${error.message || error}`,
+        HttpStatus.INTERNAL_SERVER_ERROR,
+      );
+    }
+  }
+}
+```
+
+**Пример вызова**
+
+```js
+
+```
