@@ -3240,6 +3240,9 @@ function fetchVersionLogs() {
   } catch (e) { ui.alert("Ошибка: " + e.toString()); }
 }
 
+// ===================================================================================
+// ИНТЕГРАЦИЯ С ТЕЛЕГРАМ-БОТОМ: Сквозное сопоставление по 5 ключам + тип обработки
+// ===================================================================================
 function fetchAndApplyComments() {
   var ui = SpreadsheetApp.getUi();
   var ss = SpreadsheetApp.getActiveSpreadsheet();
@@ -3303,6 +3306,8 @@ function fetchAndApplyComments() {
       var isTotalRow = values[i].join("").indexOf("Всего") > -1 || values[i].join("").indexOf("Итого") > -1;
 
       if (!isTotalRow) {
+        
+        // --- ДЕТАЛЬНЫЙ ДАШБОРД ---
         if (sheetName === "📈 Детальный Дашборд") {
           var dateCell    = values[i][0]; 
           var shiftCell   = values[i][1]; 
@@ -3328,11 +3333,15 @@ function fetchAndApplyComments() {
               });
 
               matched.forEach(function(m) {
-                rowComments.push("👤 Оператор: " + ctx.operator + " (" + ctx.opType + ") (Док. " + ctx.docNo + ", Поз. " + ctx.posNo + ", Оп. " + ctx.opNo + "):\n" + m.FullComment);
+                // ИЗМЕНЕНИЕ: Убираем переносы строк \n внутри комментария и заменяем на горизонтальный разделитель
+                var singleLineComment = String(m.FullComment).replace(/\r?\n/g, "  |  ");
+                rowComments.push("👤 Оператор: " + ctx.operator + " (" + ctx.opType + ") (Док. " + ctx.docNo + ", Поз. " + ctx.posNo + ", Оп. " + ctx.opNo + "): " + singleLineComment);
               });
             });
           }
         } 
+        
+        // --- ОБЩИЙ ДАШБОРД ---
         else if (sheetName === "📊 Общий Дашборд") {
           var articleCell = values[i][0]; 
           var docCell     = values[i][1]; 
@@ -3354,21 +3363,32 @@ function fetchAndApplyComments() {
               });
 
               matched.forEach(function(m) {
-                rowComments.push("👤 Оператор: " + ctx.operator + " (" + ctx.opType + ") (Станок " + ctx.machine + ", Поз. " + ctx.posNo + ", Оп. " + ctx.opNo + "):\n" + m.FullComment);
+                // ИЗМЕНЕНИЕ: Убираем переносы строк \n внутри комментария и заменяем на горизонтальный разделитель
+                var singleLineComment = String(m.FullComment).replace(/\r?\n/g, "  |  ");
+                rowComments.push("👤 " + ctx.operator + " (" + ctx.opType + ") (Станок " + ctx.machine + ", Поз. " + ctx.posNo + ", Оп. " + ctx.opNo + "): " + singleLineComment);
               });
             });
           }
         }
       }
 
-      commentsToWrite.push([rowComments.join("\n\n──────────────────\n\n")]);
+      // ИЗМЕНЕНИЕ: Объединяем разные логи/комментарии в одну строчку через красивый разделитель " ◆ " без переносов строк \n
+      commentsToWrite.push([rowComments.join("   ◆   ")]);
     }
 
     if (commentsToWrite.length > 0) {
       var targetRange = sheet.getRange(4, commentColIndex + 1, commentsToWrite.length, 1);
       targetRange.setValues(commentsToWrite);
+      
+      // 1. Включаем обрезку текста по границе ячейки (CLIP)
       targetRange.setWrapStrategy(SpreadsheetApp.WrapStrategy.CLIP);
       targetRange.setVerticalAlignment("center");
+      
+      // 2. СБРОС ВЫСОТЫ СТРОК: Принудительно возвращаем высоту строк в стандартные 20 пикселей.
+      var numRows = sheet.getLastRow() - 3;
+      if (numRows > 0) {
+        sheet.setRowHeights(4, numRows, 20); 
+      }
     }
 
     ui.alert("✅ Готово!", "Комментарии успешно сопоставлены по станкам, документам, позициям, операциям, ФИО и типу работы.", ui.ButtonSet.OK);
