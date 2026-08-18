@@ -3605,3 +3605,418 @@ function parseNumber(val) {
    * Импортируйте данные: **`🏭 Производство`** -> **`📥 1. Загрузить Аналитику (План/Факт)`** (будет автоматически создан лист `Аналитика_Данные`).
    * Сформируйте дашборды: выберите пункты **`2`** и **`3`** в меню.
    * Нажмите **`💬 4. Подтянуть комментарии к дашборду`**, чтобы подтянуть чек-листы и текстовые отчеты операторов.
+
+## Обновление версии снапшота
+
+### Шаг 1. Обновление процедуры логов в БД `GROSVER_GROUP` (на сервере SAP)
+
+Выполните данный `ALTER PROCEDURE` в СУБД в базе **`GROSVER_GROUP`**:
+
+```sql
+USE [GROSVER_GROUP]
+GO
+
+SET ANSI_NULLS ON
+GO
+SET QUOTED_IDENTIFIER ON
+GO
+
+ALTER PROCEDURE [dbo].[SP_GetPlanSnapshotLogs]
+AS
+BEGIN
+    SET NOCOUNT ON;
+
+    -- Динамически рассчитываем разницу в днях между датой создания и максимальной датой плана внутри версии
+    SELECT 
+        MAX(Upload_Date) AS [Дата_Создания], 
+        Report_Month AS [Месяц], 
+        Version_Num AS [Версия],
+        DATEDIFF(day, CAST(MAX(Upload_Date) AS DATE), MAX([Date])) AS [Горизонт_Дней]
+    FROM [dbo].[GC_PLAN_SNAPSHOT] 
+    GROUP BY Report_Month, Version_Num 
+    ORDER BY Report_Month DESC, Version_Num DESC;
+END
+GO
+```
+
+---
+
+### 1. Обновленная функция `fetchVersionLogs`
+
+```javascript
+// Функция выгрузки логов напрямую из SQL Server с добавлением Горизонта вторым столбцом
+function fetchVersionLogs() {
+  var ui = SpreadsheetApp.getUi();
+  var query = "EXEC [dbo].[SP_GetPlanSnapshotLogs]";
+  
+  var options = Object.assign({}, API_OPTIONS);
+  options.payload = JSON.stringify({ "query": query });
+
+  try {
+    var res = UrlFetchApp.fetch(API_URL, options);
+    var json = JSON.parse(res.getContentText());
+    
+    if (!json.success || !json.data) {
+      throw new Error(json.error || json.message || res.getContentText());
+    }
+    
+    var data = json.data;
+    if (data.length === 0) {
+      ui.alert("В базе данных пока нет ни одной сохраненной версии плана.");
+      return;
+    }
+
+    var ss = SpreadsheetApp.getActiveSpreadsheet();
+    var logSheet = ss.getSheetByName("📖 Логи Версий");
+    if (!logSheet) logSheet = ss.insertSheet("📖 Логи Версий");
+    
+    logSheet.clear(); // Очищаем старое перед перезаписью
+    
+    // Новая структура заголовков: Горизонт идет вторым столбцом
+    var rows = [["Дата и время выгрузки (в базе)", "Горизонт (дней вперед)", "Отчетный Месяц", "Доступная Версия (План)"]];
+    
+    for (var i = 0; i < data.length; i++) {
+      var uploadDate = data[i]["Дата_Создания"] ? data[i]["Дата_Создания"].toString().replace('T', ' ').substring(0, 19) : "";
+      var reportMonth = formatSqlDateRegex(data[i]["Месяц"]);
+      var horizonDays = data[i]["Горизонт_Дней"];
+      var horizonText = (horizonDays !== null && horizonDays !== undefined) ? horizonDays + " дней" : "Не указан";
+      
+      rows.push([
+        uploadDate, 
+        horizonText, // Записываем во 2-й столбец
+        reportMonth, 
+        data[i]["Версия"]
+      ]);
+    }
+    
+    logSheet.getRange(1, 1, rows.length, 4).setValues(rows);
+    logSheet.getRange("A1:D1").setFontWeight("bold").setBackground("#fff2cc");
+    logSheet.autoResizeColumns(1, 4);
+    
+    ui.alert("📖 Логи версий успешно обновлены!");
+    
+  } catch (e) {
+    ui.alert("Ошибка загрузки логов: " + e.toString());
+  }
+}
+```
+
+### 2. Обновленная функция `createNewSnapshot`
+
+```javascript
+// Функция создания снимка плана с записью горизонта во второй столбец лога
+function createNewSnapshot() {
+  var ui = SpreadsheetApp.getUi();
+  var response = ui.prompt("Снимок Плана", "На сколько дней вперед сохранить план? (по умолчанию 30):", ui.ButtonSet.OK_CANCEL);
+  if (response.getSelectedButton() !== ui.Button.OK) return;
+  var days = parseInt(response.getResponseText().trim()) || 30;
+
+  var query = "EXEC [dbo].[SP_AddPlanSnapshot] @DaysAhead = " + days;
+  var options = Object.assign({}, API_OPTIONS);
+  options.payload = JSON.stringify({ "query": query });
+
+  try {
+    var res = UrlFetchApp.fetch(API_URL, options);
+    var json = JSON.parse(res.getContentText());
+    if (json.success && json.data && json.data.length > 0) {
+      
+      var newVersion = json.data[0].NewVersion;
+      var month = formatSqlDateRegex(json.data[0].Month);
+      var message = json.data[0].Message;
+      
+      // =====================================
+      // ПИШЕМ ЛОГ В ТАБЛИЦУ (ГОРИЗОНТ ВО 2-Й СТОЛБЕЦ)
+      // =====================================
+      var ss = SpreadsheetApp.getActiveSpreadsheet();
+      var logSheet = ss.getSheetByName("📖 Логи Версий");
+      if (!logSheet) {
+        logSheet = ss.insertSheet("📖 Логи Версий");
+        logSheet.appendRow(["Дата и время выгрузки", "Горизонт (дней вперед)", "Отчетный Месяц", "Доступная Версия (План)"]);
+        logSheet.getRange("A1:D1").setFontWeight("bold").setBackground("#fff2cc");
+        logSheet.setFrozenRows(1);
+      }
+      
+      var timestamp = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), "dd.MM.yyyy HH:mm:ss");
+      
+      // ИСПРАВЛЕНО: Записываем параметр days во 2-й столбец
+      logSheet.appendRow([timestamp, days + " дней", month, newVersion]);
+      logSheet.autoResizeColumns(1, 4);
+      // =====================================
+
+      ui.alert("Успех!", message + "\nМесяц: " + month + "\nЗапись добавлена в логи.", ui.ButtonSet.OK);
+    }
+  } catch (e) { ui.alert("Критическая ошибка: " + e.toString()); }
+}
+```
+
+## Оптимизация на уровне SQL (Фильтрация на сервере)
+
+### Шаг 1. Добавление параметров дат в процедуру `SP_GetBotComments` (База `ChecklistBot`)
+
+Выполните этот `ALTER PROCEDURE` в СУБД бота. Теперь процедура принимает `@DateFrom` и `@DateTo` и делает быструю фильтрацию по индексу даты:
+
+```sql
+USE [ChecklistBot]
+GO
+
+SET ANSI_NULLS ON
+GO
+SET QUOTED_IDENTIFIER ON
+GO
+
+ALTER PROCEDURE [dbo].[SP_GetBotComments]
+    @DateFrom DATE = NULL,
+    @DateTo DATE = NULL
+AS
+BEGIN
+    SET NOCOUNT ON;
+    
+    -- Если даты не переданы, по умолчанию берем за последний год для безопасности
+    IF @DateFrom IS NULL SET @DateFrom = GETDATE();
+    IF @DateTo IS NULL SET @DateTo = GETDATE();
+
+    WITH AllLogs AS (
+        SELECT 
+            r.MachineCode, 
+            CAST(r.PartNumber AS NVARCHAR(50)) AS PartNumber,
+            CAST(r.DocNumber AS NVARCHAR(50)) AS DocNumber, 
+            CAST(r.DocPosition AS NVARCHAR(50)) AS DocPosition, 
+            CAST(r.OperationNumber AS NVARCHAR(50)) AS OperationNumber,
+            RTRIM(LTRIM(r.AuthorFullName)) AS AuthorFullName,
+            RTRIM(LTRIM(r.OperationType)) AS OperationType,
+            CONCAT(N'🛠 [', FORMAT(r.CreatedAt, 'dd.MM HH:mm'), N'] Чек-лист: ', q.Text, N' - ', CASE WHEN a.IsOk = 1 THEN N'ОК' ELSE N'НЕ ОК' END, ISNULL(N' (' + a.Note + N')', N'')) AS LogText, 
+            r.CreatedAt
+        FROM [dbo].[ToolReports] r 
+        JOIN [dbo].[ToolReportAnswers] a ON r.Id = a.ReportId 
+        JOIN [dbo].[ToolQuestions] q ON a.QuestionId = q.Id
+        WHERE CAST(r.CreatedAt AS DATE) BETWEEN @DateFrom AND @DateTo -- ИНДЕКСНЫЙ ФИЛЬТР
+        
+        UNION ALL
+        
+        SELECT 
+            c.MachineCode, 
+            CAST(c.PartNumber AS NVARCHAR(50)) AS PartNumber,
+            CAST(c.DocNumber AS NVARCHAR(50)), 
+            CAST(c.DocPosition AS NVARCHAR(50)), 
+            CAST(c.OperationNumber AS NVARCHAR(50)),
+            RTRIM(LTRIM(c.AuthorFullName)) AS AuthorFullName,
+            RTRIM(LTRIM(c.OperationType)) AS OperationType,
+            CONCAT(N'💬 [', FORMAT(c.CreatedAt, 'dd.MM HH:mm'), N'] Коммент: ', c.Message), 
+            c.CreatedAt
+        FROM [dbo].[Checklists] c
+        WHERE CAST(c.CreatedAt AS DATE) BETWEEN @DateFrom AND @DateTo -- ИНДЕКСНЫЙ ФИЛЬТР
+    )
+    SELECT 
+        RTRIM(LTRIM(MachineCode)) AS MachineCode, 
+        RTRIM(LTRIM(PartNumber)) AS PartNumber,
+        RTRIM(LTRIM(DocNumber)) AS DocNumber, 
+        RTRIM(LTRIM(DocPosition)) AS DocPosition, 
+        RTRIM(LTRIM(OperationNumber)) AS OperationNumber,
+        RTRIM(LTRIM(AuthorFullName)) AS AuthorFullName,
+        RTRIM(LTRIM(OperationType)) AS OperationType,
+        STRING_AGG(LogText, CHAR(10)) WITHIN GROUP (ORDER BY CreatedAt) AS FullComment
+    FROM AllLogs 
+    GROUP BY MachineCode, PartNumber, DocNumber, DocPosition, OperationNumber, AuthorFullName, OperationType;
+END
+GO
+```
+
+---
+
+### Шаг 2. Обновление Google Apps Script (`Code.gs`)
+
+```javascript
+function fetchAndApplyComments() {
+  var ui = SpreadsheetApp.getUi();
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var sheet = ss.getActiveSheet();
+  var sheetName = sheet.getName();
+
+  if (sheetName !== "📈 Детальный Дашборд" && sheetName !== "📊 Общий Дашборд") {
+    ui.alert("Откройте '📈 Детальный Дашборд' или '📊 Общий Дашборд', чтобы загрузить комментарии.");
+    return;
+  }
+
+  var rawSheet = ss.getSheetByName("Аналитика_Данные");
+  if (!rawSheet) {
+    ui.alert("Отсутствует лист с сырыми данными 'Аналитика_Данные'.");
+    return;
+  }
+
+  try {
+    var rawValues = rawSheet.getDataRange().getValues();
+    if (rawValues.length <= 1) {
+      ui.alert("Сначала загрузите аналитические данные за период.");
+      return;
+    }
+
+    // =========================================================================
+    // ОПТИМИЗАЦИЯ: Автоматически вычисляем границы дат для отправки в SQL бота
+    // =========================================================================
+    var dates = [];
+    for (var row = 1; row < rawValues.length; row++) {
+      var dStr = formatDateToYmd(rawValues[row][1]); // Читаем даты из столбца B
+      if (dStr) dates.push(dStr);
+    }
+    
+    if (dates.length === 0) {
+      ui.alert("Не удалось определить диапазон дат для фильтрации комментариев.");
+      return;
+    }
+    
+    dates.sort(); // Сортируем даты по возрастанию
+    var dateFrom = dates[0];
+    var dateTo = dates[dates.length - 1];
+    
+    // Вызываем процедуру с передачей дат. Сервер вернет только нужные строки!
+    var query = "EXEC [dbo].[SP_GetBotComments] @DateFrom = '" + dateFrom + "', @DateTo = '" + dateTo + "'";
+    // =========================================================================
+
+    var options = Object.assign({}, API_OPTIONS);
+    options.payload = JSON.stringify({ "query": query });
+
+    var response = UrlFetchApp.fetch(BOT_API_URL, options);
+    var json = JSON.parse(response.getContentText());
+    
+    if (!json.success || !json.data) throw new Error(json.error || json.message || response.getContentText());
+    var botComments = json.data;
+
+    var dataRange = sheet.getDataRange();
+    var values = dataRange.getValues();
+    var lastCol = sheet.getLastColumn();
+
+    var commentColIndex = -1;
+    for (var c = 0; c < lastCol; c++) {
+      if (values[2] && values[2][c] === "Комментарии из Бота") {
+        commentColIndex = c; 
+        break;
+      }
+    }
+    if (commentColIndex === -1) {
+      commentColIndex = lastCol;
+      sheet.getRange(3, commentColIndex + 1).setValue("Комментарии из Бота")
+           .setFontWeight("bold").setBackground("#fff2cc").setHorizontalAlignment("center");
+      sheet.setColumnWidth(commentColIndex + 1, 380);
+    }
+
+    if (sheet.getLastRow() > 3) {
+      sheet.getRange(4, commentColIndex + 1, sheet.getLastRow() - 3, 1).clearContent();
+    }
+
+    var commentsToWrite = [];
+    var currentDate = "";
+    var currentShift = "";
+    var currentMachine = "";
+    var currentArticle = "";
+
+    for (var i = 3; i < values.length; i++) {
+      var rowComments = [];
+      var isTotalRow = values[i].join("").indexOf("Всего") > -1 || values[i].join("").indexOf("Итого") > -1;
+
+      if (!isTotalRow) {
+        
+        // --- ДЕТАЛЬНЫЙ ДАШБОРД ---
+        if (sheetName === "📈 Детальный Дашборд") {
+          var dateCell    = values[i][0]; 
+          var shiftCell   = values[i][1]; 
+          var machineCell = values[i][2]; 
+          var articleCell = values[i][3]; 
+
+          if (dateCell !== "")    currentDate = formatDateValue(dateCell);
+          if (shiftCell !== "")   currentShift = String(shiftCell).trim();
+          if (machineCell !== "") currentMachine = String(machineCell).trim();
+          var article = String(articleCell).trim();
+
+          if (article !== "" && article.indexOf("Общий простой") === -1) {
+            var contexts = getContextForDetailed(rawValues, currentDate, currentShift, currentMachine, article);
+            
+            contexts.forEach(function(ctx) {
+              var matched = botComments.filter(function(bot) {
+                return bot.MachineCode === currentMachine &&
+                       bot.DocNumber === ctx.docNo &&
+                       bot.DocPosition === ctx.posNo &&
+                       bot.OperationNumber === ctx.opNo &&
+                       isNameMatch(ctx.operator, bot.AuthorFullName) &&
+                       bot.OperationType === ctx.opType;
+              });
+
+              matched.forEach(function(m) {
+                var singleLineComment = String(m.FullComment).replace(/\r?\n/g, "  |  ");
+                rowComments.push("👤 Оператор: " + ctx.operator + " (" + ctx.opType + ") (Док. " + ctx.docNo + ", Поз. " + ctx.posNo + ", Оп. " + ctx.opNo + "): " + singleLineComment);
+              });
+            });
+          }
+        } 
+        
+        // --- ОБЩИЙ ДАШБОРД ---
+        else if (sheetName === "📊 Общий Дашборд") {
+          var articleCell = values[i][0]; 
+          var docCell     = values[i][1]; 
+
+          if (articleCell !== "") currentArticle = String(articleCell).trim();
+          var docNo = String(docCell).trim();
+
+          if (docNo !== "" && docNo.indexOf("Всего") === -1 && docNo.indexOf("Общий простой") === -1) {
+            var contexts = getContextForAggregated(rawValues, currentArticle, docNo);
+            
+            contexts.forEach(function(ctx) {
+              var matched = botComments.filter(function(bot) {
+                return bot.MachineCode === ctx.machine &&
+                       bot.DocNumber === docNo &&
+                       bot.DocPosition === ctx.posNo &&
+                       bot.OperationNumber === ctx.opNo &&
+                       isNameMatch(ctx.operator, bot.AuthorFullName) &&
+                       bot.OperationType === ctx.opType;
+              });
+
+              matched.forEach(function(m) {
+                var singleLineComment = String(m.FullComment).replace(/\r?\n/g, "  |  ");
+                rowComments.push("👤 " + ctx.operator + " (" + ctx.opType + ") (Станок " + ctx.machine + ", Поз. " + ctx.posNo + ", Оп. " + ctx.opNo + "): " + singleLineComment);
+              });
+            });
+          }
+        }
+      }
+
+      commentsToWrite.push([rowComments.join("   ◆   ")]);
+    }
+
+    if (commentsToWrite.length > 0) {
+      var targetRange = sheet.getRange(4, commentColIndex + 1, commentsToWrite.length, 1);
+      targetRange.setValues(commentsToWrite);
+      targetRange.setWrapStrategy(SpreadsheetApp.WrapStrategy.CLIP);
+      targetRange.setVerticalAlignment("center");
+      
+      var numRows = sheet.getLastRow() - 3;
+      if (numRows > 0) {
+        sheet.setRowHeights(4, numRows, 20); 
+      }
+    }
+
+    ui.alert("✅ Готово!", "Комментарии успешно сопоставлены по станкам, документам, позициям, операциям, ФИО и типу работы.", ui.ButtonSet.OK);
+
+  } catch (e) {
+    ui.alert("❌ Ошибка выполнения: " + e.toString());
+  }
+}
+
+// Вспомогательная функция для конвертации дат в yyyy-MM-dd
+function formatDateToYmd(val) {
+  if (!val) return null;
+  if (val instanceof Date) {
+    return Utilities.formatDate(val, Session.getScriptTimeZone(), "yyyy-MM-dd");
+  }
+  var s = val.toString().trim();
+  var matchDmy = s.match(/^(\d{2})\.(\d{2})\.(\d{4})/);
+  if (matchDmy) {
+    return matchDmy[3] + "-" + matchDmy[2] + "-" + matchDmy[1];
+  }
+  var matchYmd = s.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (matchYmd) return s.substring(0, 10);
+  return null;
+}
+```
+
+### Как изменится скорость работы:
+* **Раньше:** При загрузке дашборда за 2 дня по сети летели логи бота за 3 года (десятки тысяч строк), что сильно тормозило процесс.
+* **Теперь:** Если на дашборде выбран период в 2 дня, SQL-сервер выберет только те комменты, которые написали в эти 2 дня, и передаст в Google Sheets легкий пакет данных (несколько десятков строк). Весь процесс займет доли секунды, а система будет масштабируема без ограничений.
