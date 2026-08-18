@@ -1743,8 +1743,1845 @@ export class BotQueryService implements OnModuleInit, OnModuleDestroy {
 }
 ```
 
-**Пример вызова**
+## Реализация версия 1
+
+```sql
+USE [GROSVER_GROUP]
+GO
+
+IF OBJECT_ID('dbo.VW_PRODUCTION_ANALYTICS', 'V') IS NOT NULL
+    DROP VIEW dbo.VW_PRODUCTION_ANALYTICS;
+GO
+
+CREATE VIEW [dbo].[VW_PRODUCTION_ANALYTICS] AS
+
+-- ===================================
+-- 1. СРЕЗ: ПЛАН (Оператор NULL)
+-- ===================================
+SELECT 
+    N'План' AS [Тип Данных],
+    CONVERT(DATE, RIGHT(RTRIM(p.[Shift]), 10), 104) AS [Дата],
+    CAST(LEFT(RTRIM(p.[Shift]), 1) AS INT) AS [Смена],
+    RTRIM(LTRIM(p.RESOURCE)) AS [Станок],
+    RTRIM(LTRIM(CAST(p.BELNR_ID AS NVARCHAR(50)))) AS [Номер документа], -- Переименовано
+    RTRIM(LTRIM(CAST(p.BELPOS_ID AS NVARCHAR(50)))) AS [Позиция],
+    RTRIM(LTRIM(CAST(p.POS_ID AS NVARCHAR(50)))) AS [Операция],
+    RTRIM(LTRIM(p.ItemCode)) AS [Артикул],
+    NULL AS [Оператор], -- В плане нет фактического оператора
+    p.[Version_Num] AS [Версия_Плана],
+    p.Plan_Qty_Details AS [План_Шт],
+    p.Duration AS [План_Время_Мин],
+    0 AS [Факт_Шт],
+    0 AS [Факт_Время_Мин],
+    0 AS [Прерывания_Мин]
+FROM [dbo].[GC_PLAN_SNAPSHOT] p
+
+UNION ALL
+
+-- ===================================
+-- 2. СРЕЗ: ФАКТ (ФИО из DisplayName)
+-- ===================================
+SELECT 
+    CASE WHEN f.Kol_detalej < 0 THEN N'Факт (Брак/Сторно)' ELSE N'Факт' END AS [Тип Данных],
+    f.Date AS [Дата],
+    CAST(f.[Shift] AS INT) AS [Смена],
+    RTRIM(LTRIM(f.APLATZ_ID)) AS [Станок],
+    RTRIM(LTRIM(CAST(f.BELNR_ID AS NVARCHAR(50)))) AS [Номер документа], -- Переименовано
+    RTRIM(LTRIM(CAST(f.BELPOS_ID AS NVARCHAR(50)))) AS [Позиция],
+    RTRIM(LTRIM(CAST(f.POS_ID AS NVARCHAR(50)))) AS [Операция],
+    RTRIM(LTRIM(f.ItemCode)) AS [Артикул],
+    RTRIM(LTRIM(f.DisplayName)) AS [Оператор], -- ФИО оператора из ФАКТА
+    0 AS [Версия_Плана],
+    0, 0,
+    CASE WHEN f.Kol_detalej > 0 THEN f.Kol_detalej ELSE 0 END AS [Факт_Шт],
+    CASE WHEN f.[End Time] >= f.[Start Time] THEN DATEDIFF(MINUTE, f.[Start Time], f.[End Time]) ELSE 0 END AS [Fact_Min],
+    0 AS [Прерывания_Мин]
+FROM [dbo].[GC_FACT_FINANCIAL_REPORT] f
+WHERE f.[Start Time] IS NOT NULL AND f.[End Time] IS NOT NULL
+
+UNION ALL
+
+-- ===================================
+-- 3. СРЕЗ: ПРЕРЫВАНИЯ (ФИО из PERS_ID_Name)
+-- ===================================
+SELECT 
+    N'Прерывание' AS [Тип Данных],
+    i.Дата AS [Дата],
+    CAST(i.Смена AS INT) AS [Смена],
+    RTRIM(LTRIM(i.APLATZ_ID)) AS [Станок],
+    ISNULL(RTRIM(LTRIM(CAST(i.BELNR_ID AS NVARCHAR(50)))), N'Вне документа') AS [Номер документа], -- Переименовано
+    ISNULL(RTRIM(LTRIM(CAST(i.BELPOS_ID AS NVARCHAR(50)))), N'-') AS [Позиция],
+    ISNULL(RTRIM(LTRIM(CAST(i.POS_ID AS NVARCHAR(50)))), N'-') AS [Операция],
+    ISNULL(RTRIM(LTRIM(i.ItemCode)), N'Общий простой станка') AS [Артикул],
+    RTRIM(LTRIM(i.PERS_ID_Name)) AS [Оператор], -- ФИО из прерываний
+    0 AS [Версия_Плана],
+    0, 0, 0, 0,
+    i.[Продолжительность, мин] AS [Прерывания_Мин]
+FROM (
+    SELECT t0.*
+    FROM (
+        SELECT 
+            t0.APLATZ_ID, t10.DATUM_VON, 
+            CASE WHEN t10.DATUM_BIS <= GETDATE() THEN t10.DATUM_BIS ELSE GETDATE() END AS End_Date,
+            t10.DATUM_BIS, t0.INTNR, t0.GRUNDID, t6.GRUNDINFO AS Стандарт_наименование_прерывания, 
+            t0.GRUNDINFO, t0.PERS_ID_Name, t0.PERS_ID_END_Name, t0.UDF1, t0.UDF2,
+            DATEDIFF(mi, t10.DATUM_VON, (CASE WHEN t10.DATUM_BIS <= GETDATE() THEN t10.DATUM_BIS ELSE GETDATE() END)) AS [Продолжительность, мин],
+            t2.ItemCode, 
+            t3.U_RESP_USER, t4.KND_ID, t4.KNDNAME, t5.bez,
+            CASE WHEN CAST(t10.DATUM_VON AS TIME) >= '07:00:00' AND CAST(t10.DATUM_VON AS TIME) < '19:00:00' THEN 1 ELSE 2 END AS Смена,
+            CASE 
+                WHEN (CASE WHEN CAST(t10.DATUM_VON AS TIME) >= '07:00:00' AND CAST(t10.DATUM_VON AS TIME) < '19:00:00' THEN 1 ELSE 2 END) = 1 THEN CAST(t10.DATUM_VON AS DATE)
+                WHEN CAST(t10.DATUM_VON AS TIME) BETWEEN '19:00:00.0000000' AND '23:59:59.0000000' THEN CAST(t10.DATUM_VON AS DATE)
+                ELSE CAST(DATEADD(day, -1, t10.DATUM_VON) AS DATE)
+            END AS Дата,
+            t1.BUCHNR_ID, t1.ANFZEIT, t1.ENDZEIT, t1.ZEIT, t1.BELNR_ID, t1.BELPOS_ID, t1.POS_ID
+        FROM GC_APLATZ_STILLSTAND_BY_SHIFT t10
+        LEFT JOIN BEAS_APLATZ_STILLSTAND t0 ON t10.INTNR = t0.INTNR AND t10.APLATZ_ID = t0.APLATZ_ID
+        LEFT JOIN beas_arbzeit t1 ON t1.APLATZ_ID = t0.APLATZ_ID AND t0.DATUM_VON >= t1.ANFZEIT AND t0.DATUM_VON < t1.ENDZEIT 
+        LEFT JOIN BEAS_FTPOS t2 ON t2.BELNR_ID = t1.BELNR_ID AND t2.BELPOS_ID = t1.BELPOS_ID 
+        LEFT JOIN OITM t3 ON t3.ItemCode = (CASE WHEN t2.ItemCode LIKE '2101%' THEN '4301'+SUBSTRING(t2.ItemCode, 5,7) ELSE t2.ItemCode END)
+        LEFT JOIN BEAS_FTHAUPT t4 ON t4.BELNR_ID = t1.BELNR_ID
+        LEFT JOIN BEAS_APLATZ t5 ON t5.APLATZ_ID = t0.APLATZ_ID
+        LEFT JOIN BEAS_STILLSTANDGRUND t6 ON t6.GRUNDID = t0.GRUNDID
+        WHERE t10.DATUM_VON >= DATEFROMPARTS(YEAR(GETDATE()), 1, 1) 
+          AND t10.DATUM_VON < t10.DATUM_BIS
+          AND t10.APLATZ_ID IN (SELECT APLATZ_ID FROM BEAS_APLATZ WHERE Active = 'J' AND GRUPPE IN ('Lathes', 'Milling') AND (APLATZ_ID NOT IN ('L02', 'L05', 'L08', 'L11', 'M04', 'M08', 'Mill', 'Turning')))
+    ) t0
+    WHERE t0.DATUM_VON < t0.End_Date
+) i;
+GO
+
+USE [GROSVER_GROUP]
+GO
+
+IF OBJECT_ID('dbo.SP_GetProductionAnalytics', 'P') IS NOT NULL 
+    DROP PROCEDURE dbo.SP_GetProductionAnalytics;
+GO
+
+CREATE PROCEDURE [dbo].[SP_GetProductionAnalytics]
+    @DateFrom DATE,
+    @DateTo DATE,
+    @PlanVersion INT = NULL 
+AS
+BEGIN
+    SET NOCOUNT ON;
+    IF @PlanVersion IS NULL OR @PlanVersion = 0
+    BEGIN
+        DECLARE @Month DATE = DATEADD(month, DATEDIFF(month, 0, @DateFrom), 0);
+        SET @PlanVersion = ISNULL((SELECT MAX([Version_Num]) FROM [dbo].[GC_PLAN_SNAPSHOT] WHERE [Report_Month] = @Month), 1);
+    END
+
+    SELECT 
+        [Тип Данных], [Дата], [Смена], [Станок], [Номер документа], [Позиция], [Операция], [Артикул], [Оператор],
+        [Версия_Плана], [План_Шт], [План_Время_Мин], [Факт_Шт], [Факт_Время_Мин], [Прерывания_Мин]
+    FROM [dbo].[VW_PRODUCTION_ANALYTICS]
+    WHERE [Дата] >= @DateFrom AND [Дата] <= @DateTo
+      AND ([Версия_Плана] = @PlanVersion OR [Версия_Плана] = 0)
+    ORDER BY [Дата], [Смена], [Станок];
+END
+GO
+
+USE [ChecklistBot]
+GO
+
+SET ANSI_NULLS ON
+GO
+SET QUOTED_IDENTIFIER ON
+GO
+
+ALTER PROCEDURE [dbo].[SP_GetBotComments] AS
+BEGIN
+    SET NOCOUNT ON;
+    
+    WITH AllLogs AS (
+        SELECT 
+            r.MachineCode, 
+            CAST(r.PartNumber AS NVARCHAR(50)) AS PartNumber,
+            CAST(r.DocNumber AS NVARCHAR(50)) AS DocNumber, 
+            CAST(r.DocPosition AS NVARCHAR(50)) AS DocPosition, 
+            CAST(r.OperationNumber AS NVARCHAR(50)) AS OperationNumber,
+            RTRIM(LTRIM(r.AuthorFullName)) AS AuthorFullName, -- ФИО автора
+            CONCAT(N'🛠 [', FORMAT(r.CreatedAt, 'dd.MM HH:mm'), N'] Чек-лист: ', q.Text, N' - ', CASE WHEN a.IsOk = 1 THEN N'ОК' ELSE N'НЕ ОК' END, ISNULL(N' (' + a.Note + N')', N'')) AS LogText, 
+            r.CreatedAt
+        FROM [dbo].[ToolReports] r 
+        JOIN [dbo].[ToolReportAnswers] a ON r.Id = a.ReportId 
+        JOIN [dbo].[ToolQuestions] q ON a.QuestionId = q.Id
+        
+        UNION ALL
+        
+        SELECT 
+            c.MachineCode, 
+            CAST(c.PartNumber AS NVARCHAR(50)) AS PartNumber,
+            CAST(c.DocNumber AS NVARCHAR(50)), 
+            CAST(c.DocPosition AS NVARCHAR(50)), 
+            CAST(c.OperationNumber AS NVARCHAR(50)),
+            RTRIM(LTRIM(c.AuthorFullName)) AS AuthorFullName, -- ФИО автора
+            CONCAT(N'💬 [', FORMAT(c.CreatedAt, 'dd.MM HH:mm'), N'] Коммент: ', c.Message), 
+            c.CreatedAt
+        FROM [dbo].[Checklists] c
+    )
+    SELECT 
+        RTRIM(LTRIM(MachineCode)) AS MachineCode, 
+        RTRIM(LTRIM(PartNumber)) AS PartNumber,
+        RTRIM(LTRIM(DocNumber)) AS DocNumber, 
+        RTRIM(LTRIM(DocPosition)) AS DocPosition, 
+        RTRIM(LTRIM(OperationNumber)) AS OperationNumber,
+        RTRIM(LTRIM(AuthorFullName)) AS AuthorFullName, -- Возвращаем в результирующий набор
+        STRING_AGG(LogText, CHAR(10)) WITHIN GROUP (ORDER BY CreatedAt) AS FullComment
+    FROM AllLogs 
+    GROUP BY MachineCode, PartNumber, DocNumber, DocPosition, OperationNumber, AuthorFullName;
+END
+GO
+```
+
 
 ```js
+var API_URL = "https://meridian-sap-api.shares.zrok.io/api/raw-query/exec";
+var BOT_API_URL = "https://meridian-sap-api.shares.zrok.io/api/bot-query/exec";
 
+var API_OPTIONS = {
+  "method": "post",
+  "contentType": "application/json",
+  "muteHttpExceptions": true,
+  "headers": { "skip_zrok_interstitial": "true" }
+};
+
+function onOpen() {
+  var ui = SpreadsheetApp.getUi();
+  ui.createMenu('🏭 Производство')
+    .addItem('📥 1. Загрузить Аналитику (План/Факт)', 'showAnalyticsDialog')
+    .addItem('📈 2. Детальный Дашборд (По дням)', 'buildDashboard')
+    .addItem('📊 3. Общий Дашборд (Итоги + График)', 'buildAggregatedDashboard')
+    .addSeparator()
+    .addItem('💬 4. Подтянуть комментарии к дашборду', 'fetchAndApplyComments')
+    .addSeparator()
+    .addItem('📸 Создать новую версию плана (Snapshot)', 'createNewSnapshot')
+    .addItem('📖 Загрузить историю версий (Логи из БД)', 'fetchVersionLogs')
+    .addToUi();
+}
+
+function showAnalyticsDialog() {
+  var html = HtmlService.createHtmlOutputFromFile('Dialog')
+      .setWidth(350).setHeight(400).setTitle('Загрузка Аналитики');
+  SpreadsheetApp.getUi().showModalDialog(html, 'Параметры выгрузки');
+}
+
+function fetchAnalyticsData(params) {
+  var query = "EXEC [dbo].[SP_GetProductionAnalytics] @DateFrom = '" + params.dateFrom + "', @DateTo = '" + params.dateTo + "', @PlanVersion = " + (params.version || "NULL");
+  
+  var options = Object.assign({}, API_OPTIONS);
+  options.payload = JSON.stringify({ "query": query });
+
+  var response = UrlFetchApp.fetch(API_URL, options);
+  var json = JSON.parse(response.getContentText());
+  
+  if (!json.success || !json.data) {
+    throw new Error("Ответ от SQL Server:\n" + (json.error || json.message || response.getContentText()));
+  }
+  
+  var data = json.data;
+  if(data.length === 0) return "Нет данных за этот период.";
+
+  var sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName("Аналитика_Данные");
+  if (!sheet) sheet = SpreadsheetApp.getActiveSpreadsheet().insertSheet("Аналитика_Данные");
+  sheet.clear();
+
+  // Добавлена колонка "Оператор" и переименован "Заказ" -> "Номер документа"
+  var headers = ["Тип Данных", "Дата", "Смена", "Станок", "Номер документа", "Позиция", "Операция", "Артикул", "Оператор", "Версия Плана", "План Шт", "План Мин", "Факт Шт", "Факт Мин", "Прерывания Мин"];
+  var rows = [headers];
+  
+  for (var i = 0; i < data.length; i++) {
+    rows.push([
+      data[i]["Тип Данных"], formatSqlDateRegex(data[i]["Дата"]), data[i]["Смена"], data[i]["Станок"],
+      data[i]["Номер документа"] || "", data[i]["Позиция"] || "", data[i]["Операция"] || "", data[i]["Артикул"] || "",
+      data[i]["Оператор"] || "",
+      data[i]["Версия_Плана"],
+      parseNumber(data[i]["План_Шт"]), parseNumber(data[i]["План_Время_Мин"]),
+      parseNumber(data[i]["Факт_Шт"]), parseNumber(data[i]["Факт_Время_Мин"]),
+      parseNumber(data[i]["Прерывания_Мин"])
+    ]);
+  }
+
+  sheet.getRange(1, 1, rows.length, rows[0].length).setValues(rows);
+  sheet.getRange("A1:O1").setFontWeight("bold").setBackground("#d9ead3");
+  sheet.getRange(2, 2, rows.length-1, 1).setNumberFormat("dd.MM.yyyy");
+  sheet.getRange(2, 11, rows.length-1, 5).setNumberFormat("0.00");
+
+  return "Успешно загружено строк: " + (rows.length - 1);
+}
+
+function createNewSnapshot() {
+  var ui = SpreadsheetApp.getUi();
+  var response = ui.prompt("Снимок Плана", "На сколько дней вперед сохранить план? (по умолчанию 30):", ui.ButtonSet.OK_CANCEL);
+  if (response.getSelectedButton() !== ui.Button.OK) return;
+  var days = parseInt(response.getResponseText().trim()) || 30;
+
+  var query = "EXEC [dbo].[SP_AddPlanSnapshot] @DaysAhead = " + days;
+  var options = Object.assign({}, API_OPTIONS);
+  options.payload = JSON.stringify({ "query": query });
+
+  try {
+    var res = UrlFetchApp.fetch(API_URL, options);
+    var json = JSON.parse(res.getContentText());
+    if (json.success && json.data && json.data.length > 0) {
+      
+      var newVersion = json.data[0].NewVersion;
+      var month = formatSqlDateRegex(json.data[0].Month);
+      var message = json.data[0].Message;
+      
+      var ss = SpreadsheetApp.getActiveSpreadsheet();
+      var logSheet = ss.getSheetByName("📖 Логи Версий");
+      if (!logSheet) {
+        logSheet = ss.insertSheet("📖 Логи Версий");
+        logSheet.appendRow(["Дата и время выгрузки", "Отчетный Месяц", "Доступная Версия (План)", "Горизонт"]);
+        logSheet.getRange("A1:D1").setFontWeight("bold").setBackground("#fff2cc");
+        logSheet.setFrozenRows(1);
+      }
+      
+      var timestamp = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), "dd.MM.yyyy HH:mm:ss");
+      logSheet.appendRow([timestamp, month, newVersion, days + " дней"]);
+      logSheet.autoResizeColumns(1, 4);
+
+      ui.alert("Успех!", message + "\nМесяц: " + month + "\nЗапись добавлена в логи.", ui.ButtonSet.OK);
+    }
+  } catch (e) { ui.alert("Критическая ошибка: " + e.toString()); }
+}
+
+// ---------------------------------------------------------
+// ДАШБОРД 1: ДЕТАЛЬНЫЙ
+// ---------------------------------------------------------
+function buildDashboard() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var sourceSheet = ss.getSheetByName("Аналитика_Данные");
+  if (!sourceSheet) { SpreadsheetApp.getUi().alert("Сначала загрузите данные!"); return; }
+
+  var dashName = "📈 Детальный Дашборд";
+  var dashSheet = ss.getSheetByName(dashName);
+  if (dashSheet) ss.deleteSheet(dashSheet);
+  
+  dashSheet = ss.insertSheet(dashName);
+  ss.setActiveSheet(dashSheet);
+  ss.moveActiveSheet(1); 
+
+  var sourceRange = sourceSheet.getDataRange();
+  var pivotTable = dashSheet.getRange('A3').createPivotTable(sourceRange);
+
+  pivotTable.addRowGroup(2).showTotals(true);  // Дата
+  pivotTable.addRowGroup(3).showTotals(true);  // Смена
+  pivotTable.addRowGroup(4).showTotals(true);  // Станок
+  pivotTable.addRowGroup(8).showTotals(false); // Деталь (Артикул)
+
+  // Новые индексы колонок из-за добавления столбца "Оператор"
+  pivotTable.addPivotValue(11, SpreadsheetApp.PivotTableSummarizeFunction.SUM).setDisplayName('План (шт)');
+  pivotTable.addPivotValue(13, SpreadsheetApp.PivotTableSummarizeFunction.SUM).setDisplayName('Факт (шт)');
+  
+  try {
+    var pf = pivotTable.addCalculatedPivotValue('% Выполн.', "=IFERROR('Факт Шт' / 'План Шт'; 0)");
+    pf.setFormulaSyntax(SpreadsheetApp.PivotTableCalculatedValueFormulaSyntax.CUSTOM);
+  } catch(e) { Logger.log(e); }
+
+  pivotTable.addPivotValue(12, SpreadsheetApp.PivotTableSummarizeFunction.SUM).setDisplayName('План (мин)');
+  pivotTable.addPivotValue(14, SpreadsheetApp.PivotTableSummarizeFunction.SUM).setDisplayName('Факт (мин)');
+  pivotTable.addPivotValue(15, SpreadsheetApp.PivotTableSummarizeFunction.SUM).setDisplayName('Простой (мин)');
+
+  dashSheet.getRange("A1").setValue("Производственный Дашборд: Детальный (План / Факт / Простой)")
+           .setFontSize(14).setFontWeight("bold").setFontColor("#1a73e8");
+  dashSheet.getRange("A2").setValue("💡 Разворачивайте станок (+), чтобы увидеть детализацию по артикулам")
+           .setFontStyle("italic").setFontColor("#5f6368");
+
+  dashSheet.setColumnWidth(1, 100); dashSheet.setColumnWidth(2, 70);
+  dashSheet.setColumnWidth(3, 110); dashSheet.setColumnWidth(4, 150);
+  dashSheet.getRange("E:J").setNumberFormat('[=0]"";#,##0.##'); 
+  dashSheet.getRange("G:G").setNumberFormat('[=0]"";0%'); 
+  dashSheet.setFrozenRows(3);
+}
+
+// ---------------------------------------------------------
+// ДАШБОРД 2: ОБЩИЙ АГРЕГИРОВАННЫЙ
+// ---------------------------------------------------------
+function buildAggregatedDashboard() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var sourceSheet = ss.getSheetByName("Аналитика_Данные");
+  if (!sourceSheet) { SpreadsheetApp.getUi().alert("Сначала загрузите данные!"); return; }
+
+  var dashName = "📊 Общий Дашборд";
+  var dashSheet = ss.getSheetByName(dashName);
+  if (dashSheet) ss.deleteSheet(dashSheet);
+  
+  dashSheet = ss.insertSheet(dashName);
+  ss.setActiveSheet(dashSheet);
+  ss.moveActiveSheet(2); 
+
+  var sourceRange = sourceSheet.getDataRange();
+  var pivotTable = dashSheet.getRange('A3').createPivotTable(sourceRange);
+
+  pivotTable.addRowGroup(8).showTotals(true);  // Артикул
+  pivotTable.addRowGroup(5).showTotals(false); // Номер документа (был "Заказ")
+
+  // Новые индексы из-за колонки "Оператор"
+  pivotTable.addPivotValue(11, SpreadsheetApp.PivotTableSummarizeFunction.SUM).setDisplayName('Всего План (шт)');
+  pivotTable.addPivotValue(13, SpreadsheetApp.PivotTableSummarizeFunction.SUM).setDisplayName('Всего Факт (шт)');
+  
+  try {
+    var pf = pivotTable.addCalculatedPivotValue('% Выполн.', "=IFERROR('Факт Шт' / 'План Шт'; 0)");
+    pf.setFormulaSyntax(SpreadsheetApp.PivotTableCalculatedValueFormulaSyntax.CUSTOM);
+  } catch(e) { Logger.log(e); }
+
+  pivotTable.addPivotValue(12, SpreadsheetApp.PivotTableSummarizeFunction.SUM).setDisplayName('Всего План (мин)');
+  pivotTable.addPivotValue(14, SpreadsheetApp.PivotTableSummarizeFunction.SUM).setDisplayName('Всего Факт (мин)');
+  pivotTable.addPivotValue(15, SpreadsheetApp.PivotTableSummarizeFunction.SUM).setDisplayName('Всего Простой (мин)');
+
+  dashSheet.getRange("A1").setValue("Агрегированный Дашборд: Итоги за выбранный период")
+           .setFontSize(14).setFontWeight("bold").setFontColor("#b31412");
+  dashSheet.getRange("A2").setValue("💡 Разворачивайте Деталь (+), чтобы увидеть номера Документов")
+           .setFontStyle("italic").setFontColor("#5f6368");
+
+  dashSheet.setColumnWidth(1, 200); dashSheet.setColumnWidth(2, 130);  
+  dashSheet.setColumnWidth(3, 110); dashSheet.setColumnWidth(4, 110); 
+  dashSheet.setColumnWidth(5, 100); dashSheet.setColumnWidth(6, 110); 
+  dashSheet.setColumnWidth(7, 110); dashSheet.setColumnWidth(8, 130); 
+
+  dashSheet.getRange("C:H").setNumberFormat('[=0]"";#,##0.##'); 
+  dashSheet.getRange("E:E").setNumberFormat('[=0]"";0%'); 
+  dashSheet.setFrozenRows(3);
+
+  SpreadsheetApp.flush();
+  var lastRow = dashSheet.getLastRow();
+  
+  if (lastRow > 4) {
+    var chart = dashSheet.newChart()
+      .asColumnChart()
+      .addRange(dashSheet.getRange(3, 1, lastRow - 3, 1))
+      .addRange(dashSheet.getRange(3, 3, lastRow - 3, 2))
+      .setNumHeaders(1)
+      .setOption('title', 'Сравнение: План vs Факт по деталям')
+      .setOption('hAxis.title', 'Артикул')
+      .setOption('vAxis.title', 'Кол-во (шт)')
+      .setOption('legend', {position: 'top'})
+      .setOption('colors', ['#4285F4', '#34A853'])
+      .setPosition(3, 10, 0, 0)
+      .setOption('width', 800)
+      .setOption('height', 450)
+      .build();
+      
+    dashSheet.insertChart(chart);
+  }
+}
+
+function fetchVersionLogs() {
+  var ui = SpreadsheetApp.getUi();
+  var query = "EXEC [dbo].[SP_GetPlanSnapshotLogs]";
+  var options = Object.assign({}, API_OPTIONS);
+  options.payload = JSON.stringify({ "query": query });
+
+  try {
+    var res = UrlFetchApp.fetch(API_URL, options);
+    var json = JSON.parse(res.getContentText());
+    
+    if (!json.success || !json.data) throw new Error(json.error || json.message || res.getContentText());
+    
+    var data = json.data;
+    if (data.length === 0) {
+      ui.alert("В базе данных пока нет сохраненных версий.");
+      return;
+    }
+
+    var ss = SpreadsheetApp.getActiveSpreadsheet();
+    var logSheet = ss.getSheetByName("📖 Логи Версий");
+    if (!logSheet) logSheet = ss.insertSheet("📖 Логи Версий");
+    
+    logSheet.clear();
+    var rows = [["Дата и время выгрузки (в базе)", "Отчетный Месяц", "Доступная Версия (План)"]];
+    for (var i = 0; i < data.length; i++) {
+      var uploadDate = data[i]["Дата_Создания"] ? data[i]["Дата_Создания"].toString().replace('T', ' ').substring(0, 19) : "";
+      var reportMonth = formatSqlDateRegex(data[i]["Месяц"]);
+      rows.push([uploadDate, reportMonth, data[i]["Версия"]]);
+    }
+    
+    logSheet.getRange(1, 1, rows.length, 3).setValues(rows);
+    logSheet.getRange("A1:C1").setFontWeight("bold").setBackground("#fff2cc");
+    logSheet.autoResizeColumns(1, 3);
+    
+    ui.alert("Логи успешно восстановлены!");
+  } catch (e) { ui.alert("Ошибка: " + e.toString()); }
+}
+
+
+// ===================================================================================
+// ИНТЕГРАЦИЯ С ТЕЛЕГРАМ-БОТОМ: Сквозное 5-факторное сопоставление
+// ===================================================================================
+function fetchAndApplyComments() {
+  var ui = SpreadsheetApp.getUi();
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var sheet = ss.getActiveSheet();
+  var sheetName = sheet.getName();
+
+  if (sheetName !== "📈 Детальный Дашборд" && sheetName !== "📊 Общий Дашборд") {
+    ui.alert("Откройте '📈 Детальный Дашборд' или '📊 Общий Дашборд', чтобы загрузить комментарии.");
+    return;
+  }
+
+  var rawSheet = ss.getSheetByName("Аналитика_Данные");
+  if (!rawSheet) {
+    ui.alert("Отсутствует лист с сырыми данными 'Аналитика_Данные'.");
+    return;
+  }
+
+  try {
+    // 1. Получаем логи чек-листов и комменты из БД Бота
+    var query = "EXEC [dbo].[SP_GetBotComments]";
+    var options = Object.assign({}, API_OPTIONS);
+    options.payload = JSON.stringify({ "query": query });
+
+    var response = UrlFetchApp.fetch(BOT_API_URL, options);
+    var json = JSON.parse(response.getContentText());
+    
+    if (!json.success || !json.data) throw new Error(json.error || json.message || response.getContentText());
+    var botComments = json.data;
+
+    // 2. Читаем сырые данные один раз в оперативную память (для высокой скорости поиска)
+    var rawValues = rawSheet.getDataRange().getValues();
+
+    // 3. Читаем структуру текущего открытого дашборда
+    var dataRange = sheet.getDataRange();
+    var values = dataRange.getValues();
+    var lastCol = sheet.getLastColumn();
+
+    // Ищем/создаем колонку "Комментарии из Бота"
+    var commentColIndex = -1;
+    for (var c = 0; c < lastCol; c++) {
+      if (values[2] && values[2][c] === "Комментарии из Бота") {
+        commentColIndex = c; 
+        break;
+      }
+    }
+    if (commentColIndex === -1) {
+      commentColIndex = lastCol;
+      sheet.getRange(3, commentColIndex + 1).setValue("Комментарии из Бота")
+           .setFontWeight("bold").setBackground("#fff2cc").setHorizontalAlignment("center");
+      sheet.setColumnWidth(commentColIndex + 1, 380);
+    }
+
+    // Очищаем старые комменты
+    if (sheet.getLastRow() > 3) {
+      sheet.getRange(4, commentColIndex + 1, sheet.getLastRow() - 3, 1).clearContent();
+    }
+
+    var commentsToWrite = [];
+    var currentDate = "";
+    var currentShift = "";
+    var currentMachine = "";
+    var currentArticle = "";
+
+    // 4. Идем построчно по открытой сводной таблице
+    for (var i = 3; i < values.length; i++) {
+      var rowComments = [];
+      var isTotalRow = values[i].join("").indexOf("Всего") > -1 || values[i].join("").indexOf("Итого") > -1;
+
+      if (!isTotalRow) {
+        
+        // --- ДЕТАЛЬНЫЙ ДАШБОРД ---
+        if (sheetName === "📈 Детальный Дашборд") {
+          var dateCell    = values[i][0]; // Дата (A)
+          var shiftCell   = values[i][1]; // Смена (B)
+          var machineCell = values[i][2]; // Станок (C)
+          var articleCell = values[i][3]; // Артикул (D)
+
+          if (dateCell !== "")    currentDate = formatDateValue(dateCell);
+          if (shiftCell !== "")   currentShift = String(shiftCell).trim();
+          if (machineCell !== "") currentMachine = String(machineCell).trim();
+          var article = String(articleCell).trim();
+
+          // Если в строке выведен артикул и это не простой станка
+          if (article !== "" && article.indexOf("Общий простой") === -1) {
+            
+            // Находим все скрытые записи (Номер документа, Позиция, Операция, Оператор) в сыром логе
+            var contexts = getContextForDetailed(rawValues, currentDate, currentShift, currentMachine, article);
+            
+            contexts.forEach(function(ctx) {
+              // Ищем совпадения в БД бота по 5 ключам
+              var matched = botComments.filter(function(bot) {
+                return bot.MachineCode === currentMachine &&
+                       bot.DocNumber === ctx.docNo &&
+                       bot.DocPosition === ctx.posNo &&
+                       bot.OperationNumber === ctx.opNo &&
+                       isNameMatch(ctx.operator, bot.AuthorFullName); // Нечеткий поиск по ФИО
+              });
+
+              matched.forEach(function(m) {
+                rowComments.push("👤 Оператор: " + ctx.operator + " (Док. " + ctx.docNo + ", Поз. " + ctx.posNo + ", Оп. " + ctx.opNo + "):\n" + m.FullComment);
+              });
+            });
+          }
+        } 
+        
+        // --- ОБЩИЙ ДАШБОРД ---
+        else if (sheetName === "📊 Общий Дашборд") {
+          var articleCell = values[i][0]; // Артикул (A)
+          var docCell     = values[i][1]; // Номер документа (B)
+
+          if (articleCell !== "") currentArticle = String(articleCell).trim();
+          var docNo = String(docCell).trim();
+
+          if (docNo !== "" && docNo.indexOf("Всего") === -1 && docNo.indexOf("Общий простой") === -1) {
+            
+            // Вытягиваем контекст (Станок, Позиция, Операция, Оператор) по Артикулу и Документу
+            var contexts = getContextForAggregated(rawValues, currentArticle, docNo);
+            
+            contexts.forEach(function(ctx) {
+              var matched = botComments.filter(function(bot) {
+                return bot.MachineCode === ctx.machine &&
+                       bot.DocNumber === docNo &&
+                       bot.DocPosition === ctx.posNo &&
+                       bot.OperationNumber === ctx.opNo &&
+                       isNameMatch(ctx.operator, bot.AuthorFullName); // 5-факторный матч
+              });
+
+              matched.forEach(function(m) {
+                rowComments.push("👤 Оператор: " + ctx.operator + " (Станок " + ctx.machine + ", Поз. " + ctx.posNo + ", Оп. " + ctx.opNo + "):\n" + m.FullComment);
+              });
+            });
+          }
+        }
+      }
+
+      commentsToWrite.push([rowComments.join("\n\n──────────────────\n\n")]);
+    }
+
+    // 5. Записываем на лист
+    if (commentsToWrite.length > 0) {
+      var targetRange = sheet.getRange(4, commentColIndex + 1, commentsToWrite.length, 1);
+      targetRange.setValues(commentsToWrite);
+      targetRange.setWrap(true);
+      targetRange.setVerticalAlignment("top");
+    }
+
+    ui.alert("✅ Готово!", "Комментарии успешно сопоставлены по станкам, документам, позициям, операциям и ФИО операторов.", ui.ButtonSet.OK);
+
+  } catch (e) {
+    ui.alert("❌ Ошибка выполнения: " + e.toString());
+  }
+}
+
+// ===================================================================================
+// ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ (УТИЛИТЫ)
+// ===================================================================================
+
+// Умный поиск контекста в сыром массиве по 4 параметрам (для детального отчета)
+function getContextForDetailed(rawValues, targetDateStr, targetShift, targetMachine, targetArticle) {
+  var results = [];
+  var seenKeys = {};
+
+  for (var i = 1; i < rawValues.length; i++) {
+    var rawRow = rawValues[i];
+    var rawDate = formatDateValue(rawRow[1]);
+    var rawShift = String(rawRow[2]).trim();
+    var rawMachine = String(rawRow[3]).trim();
+    var rawArticle = String(rawRow[7]).trim();
+    
+    if (rawDate === targetDateStr && rawShift === targetShift && rawMachine === targetMachine && rawArticle === targetArticle) {
+      var docNo = String(rawRow[4]).trim();
+      var posNo = String(rawRow[5]).trim();
+      var opNo = String(rawRow[6]).trim();
+      var operator = String(rawRow[8]).trim(); // Оператор из SAP
+      
+      var key = docNo + "_" + posNo + "_" + opNo + "_" + operator;
+      if (!seenKeys[key] && docNo !== "" && docNo !== "Вне документа") {
+        seenKeys[key] = true;
+        results.push({ docNo: docNo, posNo: posNo, opNo: opNo, operator: operator });
+      }
+    }
+  }
+  return results;
+}
+
+// Умный поиск контекста в сыром массиве по Артикулу и Документу (для общего отчета)
+function getContextForAggregated(rawValues, targetArticle, targetDocNo) {
+  var results = [];
+  var seenKeys = {};
+
+  for (var i = 1; i < rawValues.length; i++) {
+    var rawRow = rawValues[i];
+    var rawArticle = String(rawRow[7]).trim();
+    var rawDocNo = String(rawRow[4]).trim();
+    
+    if (rawArticle === targetArticle && rawDocNo === targetDocNo) {
+      var machine = String(rawRow[3]).trim();
+      var posNo = String(rawRow[5]).trim();
+      var opNo = String(rawRow[6]).trim();
+      var operator = String(rawRow[8]).trim();
+      
+      var key = machine + "_" + posNo + "_" + opNo + "_" + operator;
+      if (!seenKeys[key] && machine !== "") {
+        seenKeys[key] = true;
+        results.push({ machine: machine, posNo: posNo, opNo: opNo, operator: operator });
+      }
+    }
+  }
+  return results;
+}
+
+// Нечеткое сравнение имен (Веселов Е.В. <-> Веселов, Присяжный А.С. <-> Влад Присяжный)
+function isNameMatch(nameSAP, nameBot) {
+  if (!nameSAP || !nameBot) return false;
+  
+  var s = String(nameSAP).toLowerCase().trim();
+  var b = String(nameBot).toLowerCase().trim();
+  
+  if (s === b) return true;
+  
+  // Убираем точки и знаки пунктуации
+  var cleanS = s.replace(/[.,]/g, " ");
+  var cleanB = b.replace(/[.,]/g, " ");
+  
+  var wordsS = cleanS.split(/\s+/).filter(Boolean);
+  var wordsB = cleanB.split(/\s+/).filter(Boolean);
+  
+  if (wordsS.length === 0 || wordsB.length === 0) return false;
+  
+  // Сравниваем фамилию (обычно идет первым словом в SAP)
+  var lastNameS = wordsS[0];
+  var lastNameB = wordsB[0];
+  
+  if (lastNameS.length > 2 && lastNameS === lastNameB) return true;
+  
+  // На случай, если в Телеграме фамилию написали в конце (например "Влад Присяжный")
+  for (var i = 0; i < wordsS.length; i++) {
+    for (var j = 0; j < wordsB.length; j++) {
+      if (wordsS[i].length > 3 && wordsS[i] === wordsB[j]) {
+        return true;
+      }
+    }
+  }
+  
+  return false;
+}
+
+// Преобразование дат в строковый формат dd.MM.yyyy
+function formatDateValue(val) {
+  if (!val) return "";
+  if (val instanceof Date) {
+    return Utilities.formatDate(val, Session.getScriptTimeZone(), "dd.MM.yyyy");
+  }
+  var s = val.toString().trim();
+  var matchYmd = s.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (matchYmd) {
+    return matchYmd[3] + "." + matchYmd[2] + "." + matchYmd[1];
+  }
+  var matchDmy = s.match(/^(\d{2})\.(\d{2})\.(\d{4})/);
+  if (matchDmy) {
+    return s.substring(0, 10);
+  }
+  return s;
+}
+
+function formatSqlDateRegex(sqlDateStr) {
+  if (!sqlDateStr) return '';
+  var match = sqlDateStr.toString().match(/(\d{4})-(\d{2})-(\d{2})/);
+  return match ? match[3] + "." + match[2] + "." + match[1] : sqlDateStr;
+}
+
+function parseNumber(val) {
+  if (!val) return 0;
+  return parseFloat(val.toString().replace(',', '.')) || 0;
+}
 ```
+
+## Тесты
+
+
+### Часть 1. Проверочные запросы из баз данных (SSMS)
+
+Запустите эти запросы в среде SQL Server. Результаты (сетки данных) пришлите в ответном сообщении — мы проведем их детальный математический разбор.
+
+### Запрос 1. Сырые данные Снапшота Плана (`GROSVER_GROUP`)
+Этот запрос выгрузит плановые показатели до их округления и суммирования. Мы увидим исходные дробные числа и минуты по сменам.
+
+```sql
+USE [GROSVER_GROUP]
+GO
+
+SELECT 
+    [Date] AS [Дата],
+    [Shift] AS [Смена],
+    [RESOURCE] AS [Станок],
+    [BELNR_ID] AS [Номер документа],
+    [BELPOS_ID] AS [Позиция],
+    [POS_ID] AS [Операция],
+    [ItemCode] AS [Артикул],
+    [Plan_Qty_Details] AS [Исходный_План_Шт],
+    CAST(ROUND([Plan_Qty_Details], 0) AS INT) AS [Округленный_План_Шт],
+    [Duration] AS [Время_Плана_Мин]
+FROM [dbo].[GC_PLAN_SNAPSHOT]
+WHERE [Date] BETWEEN '2026-08-15' AND '2026-08-16'
+ORDER BY [Date], [Shift], [RESOURCE], [Номер документа];
+GO
+```
+
+### Запрос 2. Сырые данные Факта SAP (`GROSVER_GROUP`)
+
+Этот запрос покажет физические транзакции сдачи готовой продукции из beas, которые прошли за эти два дня.
+
+```sql
+USE [GROSVER_GROUP]
+GO
+
+SELECT 
+    [Date] AS [Дата],
+    [Shift] AS [Смена],
+    [APLATZ_ID] AS [Станок],
+    [BELNR_ID] AS [Номер документа],
+    [BELPOS_ID] AS [Позиция],
+    [POS_ID] AS [Операция],
+    [ItemCode] AS [Артикул],
+    [DisplayName] AS [Оператор],
+    [TYP] AS [Тип (A=Обр, R=Нал)],
+    [Kol_detalej] AS [Кол-во деталей],
+    DATEDIFF(MINUTE, [Start Time], [End Time]) AS [Время_Мин]
+FROM [dbo].[GC_FACT_FINANCIAL_REPORT]
+WHERE [Date] BETWEEN '2026-08-15' AND '2026-08-16'
+ORDER BY [Date], [Shift], [APLATZ_ID], [Номер документа];
+GO
+```
+
+### Запрос 3. Сырые данные Прерываний/Простоев (`GROSVER_GROUP`)
+
+Запрос вытащит данные по простоям за 15-16 числа, которые привязаны к сменам по нашему строгому правилу (1 смена: 07:00–19:00, 2 смена: 19:00–07:00).
+
+```sql
+USE [GROSVER_GROUP]
+GO
+
+SELECT 
+    APLATZ_ID AS [Станок], 
+    DATUM_VON AS [Начало_Простоя], 
+    DATUM_BIS AS [Конец_Простоя],
+    [Продолжительность, мин] AS [Время_Простоя_Мин],
+    Смена,
+    Дата,
+    PERS_ID_Name AS [Оператор],
+    BELNR_ID AS [Номер документа],
+    BELPOS_ID AS [Позиция],
+    POS_ID AS [Операция]
+FROM (
+    SELECT 
+        t0.APLATZ_ID, t10.DATUM_VON, t10.DATUM_BIS, t0.PERS_ID_Name, t1.BELNR_ID, t1.BELPOS_ID, t1.POS_ID,
+        DATEDIFF(mi, t10.DATUM_VON, (CASE WHEN t10.DATUM_BIS <= GETDATE() THEN t10.DATUM_BIS ELSE GETDATE() END)) AS [Продолжительность, мин],
+        CASE WHEN CAST(t10.DATUM_VON AS TIME) >= '07:00:00' AND CAST(t10.DATUM_VON AS TIME) < '19:00:00' THEN 1 ELSE 2 END AS Смена,
+        CASE 
+            WHEN (CASE WHEN CAST(t10.DATUM_VON AS TIME) >= '07:00:00' AND CAST(t10.DATUM_VON AS TIME) < '19:00:00' THEN 1 ELSE 2 END) = 1 THEN CAST(t10.DATUM_VON AS DATE)
+            WHEN CAST(t10.DATUM_VON AS TIME) BETWEEN '19:00:00.0000000' AND '23:59:59.0000000' THEN CAST(t10.DATUM_VON AS DATE)
+            ELSE CAST(DATEADD(day, -1, t10.DATUM_VON) AS DATE)
+        END AS Дата
+    FROM GC_APLATZ_STILLSTAND_BY_SHIFT t10
+    LEFT JOIN BEAS_APLATZ_STILLSTAND t0 ON t10.INTNR=t0.INTNR AND t10.APLATZ_ID=t0.APLATZ_ID
+    LEFT JOIN beas_arbzeit t1 ON t1.APLATZ_ID=t0.APLATZ_ID AND t0.DATUM_VON >= t1.ANFZEIT AND t0.DATUM_VON < t1.ENDZEIT 
+) i
+WHERE Дата BETWEEN '2026-08-15' AND '2026-08-16'
+ORDER BY Дата, Смена, Станок;
+GO
+```
+
+### Запрос 4. Выгрузка комментариев и чек-листов (`ChecklistBot`)
+
+Этот запрос покажет данные из Telegram-бота, которые мы будем сопоставлять.
+
+```sql
+USE [ChecklistBot]
+GO
+EXEC [dbo].[SP_GetBotComments];
+GO
+```
+
+Для обеспечения возможности полного восстановления системы в случае сбоя или полной утери баз данных и файлов Google Таблиц подготовлен данный структурированный документ. В нем собраны все структуры таблиц, SQL-запросы, представления, хранимые процедуры и полный исходный код для Google Apps Script.
+
+---
+
+# ТЕХНИЧЕСКОЕ РУКОВОДСТВО ПО ПОЛНОМУ ВОССТАНОВЛЕНИЮ СИСТЕМЫ АНАЛИТИКИ
+
+## Часть 1. Производственная база данных (`GROSVER_GROUP`)
+
+Выполняйте эти скрипты последовательно в среде SQL Server Management Studio (SSMS).
+
+### 1.1. Создание таблицы снимков плана (`GC_PLAN_SNAPSHOT`)
+Эта статичная таблица служит для хранения архивных версий плана (снимков), полученных из Ганта, что позволяет анализировать прошлые периоды без смещения данных.
+
+```sql
+USE [GROSVER_GROUP]
+GO
+
+IF NOT EXISTS (SELECT * FROM sys.objects WHERE object_id = OBJECT_ID(N'[dbo].[GC_PLAN_SNAPSHOT]') AND type in (N'U'))
+BEGIN
+    CREATE TABLE [dbo].[GC_PLAN_SNAPSHOT] (
+        [Snapshot_ID] INT IDENTITY(1,1) PRIMARY KEY,
+        [Upload_Date] DATETIME NOT NULL,     
+        [Report_Month] DATE NOT NULL,        
+        [Version_Num] INT NOT NULL,          
+        [PRIOR_ID] NVARCHAR(50),
+        [ItemCode] NVARCHAR(50),
+        [ItemName] NVARCHAR(255),
+        [BELNR_ID] INT,
+        [BELPOS_ID] INT,
+        [POS_ID] INT,
+        [RESOURCE] NVARCHAR(50),
+        [Описание станка] NVARCHAR(255),
+        [Shift] NVARCHAR(100),
+        [Setup_Done] NVARCHAR(100),
+        [VERURSACHER_AGBEZ] NVARCHAR(255),
+        [VON] DATETIME,
+        [BIS] DATETIME,
+        [Duration] FLOAT,
+        [MENGE] FLOAT,
+        [Plan_Qty_Details] FLOAT,
+        [TEAPLATZ] FLOAT,
+        [TRAPLATZ] FLOAT,
+        [gc_intensity_fact] FLOAT,
+        [TEAPLATZ_ALT] FLOAT,
+        [Remainder_Order] FLOAT,
+        [Price_for_1_min] FLOAT,
+        [Narabotka_plan] FLOAT,
+        [Date] DATE
+    )
+END
+GO
+```
+
+### 1.2. Создание консолидирующего аналитического представления (`VW_PRODUCTION_ANALYTICS`)
+Объединяет три независимых источника (план, факт и простои) в единую плоскую структуру. Все числовые показатели округляются до целых чисел (`INT`) на уровне СУБД.
+
+```sql
+USE [GROSVER_GROUP]
+GO
+
+IF OBJECT_ID('dbo.VW_PRODUCTION_ANALYTICS', 'V') IS NOT NULL
+    DROP VIEW dbo.VW_PRODUCTION_ANALYTICS;
+GO
+
+CREATE VIEW [dbo].[VW_PRODUCTION_ANALYTICS] AS
+
+-- =========================================================================
+-- 1. СРЕЗ: ПЛАН (Тип Работы определяется по отметке наладки на Ганте)
+-- =========================================================================
+SELECT 
+    N'План' AS [Тип Данных],
+    CONVERT(DATE, RIGHT(RTRIM(p.[Shift]), 10), 104) AS [Дата],
+    CAST(LEFT(RTRIM(p.[Shift]), 1) AS INT) AS [Смена],
+    RTRIM(LTRIM(p.RESOURCE)) AS [Станок],
+    RTRIM(LTRIM(CAST(p.BELNR_ID AS NVARCHAR(50)))) AS [Номер документа],
+    RTRIM(LTRIM(CAST(p.BELPOS_ID AS NVARCHAR(50)))) AS [Позиция],
+    RTRIM(LTRIM(CAST(p.POS_ID AS NVARCHAR(50)))) AS [Операция],
+    RTRIM(LTRIM(p.ItemCode)) AS [Артикул],
+    NULL AS [Оператор],
+    CASE WHEN p.Setup_Done LIKE N'%наладка%' THEN N'Наладка' ELSE N'Обработка' END AS [Тип Работы], 
+    p.[Version_Num] AS [Версия_Плана],
+    CAST(ROUND(ISNULL(p.Plan_Qty_Details, 0), 0) AS INT) AS [План_Шт],
+    CAST(ROUND(ISNULL(p.Duration, 0), 0) AS INT) AS [План_Время_Мин],
+    0 AS [Факт_Шт],
+    0 AS [Факт_Время_Мин],
+    0 AS [Прерывания_Мин]
+FROM [dbo].[GC_PLAN_SNAPSHOT] p
+
+UNION ALL
+
+-- =========================================================================
+-- 2. СРЕЗ: ФАКТ (Тип Работы определяется на основе флага TYP из Beas)
+-- =========================================================================
+SELECT 
+    CASE WHEN f.Kol_detalej < 0 THEN N'Факт (Брак/Сторно)' ELSE N'Факт' END AS [Тип Данных],
+    f.Date AS [Дата],
+    CAST(f.[Shift] AS INT) AS [Смена],
+    RTRIM(LTRIM(f.APLATZ_ID)) AS [Станок],
+    RTRIM(LTRIM(CAST(f.BELNR_ID AS NVARCHAR(50)))) AS [Номер документа],
+    RTRIM(LTRIM(CAST(f.BELPOS_ID AS NVARCHAR(50)))) AS [Позиция],
+    RTRIM(LTRIM(CAST(f.POS_ID AS NVARCHAR(50)))) AS [Операция],
+    RTRIM(LTRIM(f.ItemCode)) AS [Артикул],
+    RTRIM(LTRIM(f.DisplayName)) AS [Оператор],
+    CASE WHEN f.TYP = 'R' THEN N'Наладка' ELSE N'Обработка' END AS [Тип Работы], 
+    0 AS [Версия_Плана],
+    0 AS [План_Шт],
+    0 AS [План_Время_Мин],
+    CAST(ROUND(CASE WHEN f.Kol_detalej > 0 THEN f.Kol_detalej ELSE 0 END, 0) AS INT) AS [Факт_Шт],
+    CAST(ROUND(CASE WHEN f.[End Time] >= f.[Start Time] THEN DATEDIFF(MINUTE, f.[Start Time], f.[End Time]) ELSE 0 END, 0) AS INT) AS [Факт_Время_Мин],
+    0 AS [Прерывания_Мин]
+FROM [dbo].[GC_FACT_FINANCIAL_REPORT] f
+WHERE f.[Start Time] IS NOT NULL AND f.[End Time] IS NOT NULL
+
+UNION ALL
+
+-- =========================================================================
+-- 3. СРЕЗ: ПРЕРЫВАНИЯ (Прерывания_Мин округляются до целых минут)
+-- =========================================================================
+SELECT 
+    N'Прерывание' AS [Тип Данных],
+    i.Дата AS [Дата],
+    CAST(i.Смена AS INT) AS [Смена],
+    RTRIM(LTRIM(i.APLATZ_ID)) AS [Станок],
+    ISNULL(RTRIM(LTRIM(CAST(i.BELNR_ID AS NVARCHAR(50)))), N'Вне документа') AS [Номер документа],
+    ISNULL(RTRIM(LTRIM(CAST(i.BELPOS_ID AS NVARCHAR(50)))), N'-') AS [Позиция],
+    ISNULL(RTRIM(LTRIM(CAST(i.POS_ID AS NVARCHAR(50)))), N'-') AS [Операция],
+    ISNULL(RTRIM(LTRIM(i.ItemCode)), N'Общий простой станка') AS [Артикул],
+    RTRIM(LTRIM(i.PERS_ID_Name)) AS [Оператор],
+    N'Прерывание' AS [Тип Работы],
+    0 AS [Версия_Плана],
+    0 AS [План_Шт],
+    0 AS [План_Время_Мин],
+    0 AS [Факт_Шт],
+    0 AS [Факт_Время_Мин],
+    CAST(ROUND(ISNULL(i.[Продолжительность, мин], 0), 0) AS INT) AS [Прерывания_Мин]
+FROM (
+    SELECT t0.*
+    FROM (
+        SELECT 
+            t0.APLATZ_ID, t10.DATUM_VON, t10.DATUM_BIS, t0.PERS_ID_Name, t1.BELNR_ID, t1.BELPOS_ID, t1.POS_ID,
+            DATEDIFF(mi, t10.DATUM_VON, (CASE WHEN t10.DATUM_BIS <= GETDATE() THEN t10.DATUM_BIS ELSE GETDATE() END)) AS [Продолжительность, мин],
+            CASE WHEN CAST(t10.DATUM_VON AS TIME) >= '07:00:00' AND CAST(t10.DATUM_VON AS TIME) < '19:00:00' THEN 1 ELSE 2 END AS Смена,
+            CASE 
+                WHEN (CASE WHEN CAST(t10.DATUM_VON AS TIME) >= '07:00:00' AND CAST(t10.DATUM_VON AS TIME) < '19:00:00' THEN 1 ELSE 2 END) = 1 THEN CAST(t10.DATUM_VON AS DATE)
+                WHEN CAST(t10.DATUM_VON AS TIME) BETWEEN '19:00:00.0000000' AND '23:59:59.0000000' THEN CAST(t10.DATUM_VON AS DATE)
+                ELSE CAST(DATEADD(day, -1, t10.DATUM_VON) AS DATE)
+            END AS Дата
+        FROM GC_APLATZ_STILLSTAND_BY_SHIFT t10
+        LEFT JOIN BEAS_APLATZ_STILLSTAND t0 ON t10.INTNR = t0.INTNR AND t10.APLATZ_ID = t0.APLATZ_ID
+        LEFT JOIN beas_arbzeit t1 ON t1.APLATZ_ID = t0.APLATZ_ID AND t0.DATUM_VON >= t1.ANFZEIT AND t0.DATUM_VON < t1.ENDZEIT 
+        LEFT JOIN BEAS_FTPOS t2 ON t2.BELNR_ID = t1.BELNR_ID AND t2.BELPOS_ID = t1.BELPOS_ID 
+        LEFT JOIN OITM t3 ON t3.ItemCode = (CASE WHEN t2.ItemCode LIKE '2101%' THEN '4301'+SUBSTRING(t2.ItemCode, 5,7) ELSE t2.ItemCode END)
+        LEFT JOIN BEAS_FTHAUPT t4 ON t4.BELNR_ID = t1.BELNR_ID
+        LEFT JOIN BEAS_APLATZ t5 ON t5.APLATZ_ID = t0.APLATZ_ID
+        LEFT JOIN BEAS_STILLSTANDGRUND t6 ON t6.GRUNDID = t0.GRUNDID
+        WHERE t10.DATUM_VON >= DATEFROMPARTS(YEAR(GETDATE()), 1, 1) 
+          AND t10.DATUM_VON < t10.DATUM_BIS
+          AND t10.APLATZ_ID IN (SELECT APLATZ_ID FROM BEAS_APLATZ WHERE Active = 'J' AND GRUPPE IN ('Lathes', 'Milling') AND (APLATZ_ID NOT IN ('L02', 'L05', 'L08', 'L11', 'M04', 'M08', 'Mill', 'Turning')))
+    ) t0
+    WHERE t0.DATUM_VON < t0.End_Date
+) i;
+GO
+```
+
+### 1.3. Хранимые процедуры
+
+#### Хранимая процедура `SP_AddPlanSnapshot`
+Выполняет автоматическое считывание текущего Ганта и фиксирует его в статическую таблицу с автоматическим расчетом номера версии.
+
+```sql
+USE [GROSVER_GROUP]
+GO
+
+IF OBJECT_ID('dbo.SP_AddPlanSnapshot', 'P') IS NOT NULL 
+    DROP PROCEDURE dbo.SP_AddPlanSnapshot;
+GO
+
+SET ANSI_NULLS ON
+GO
+SET QUOTED_IDENTIFIER ON
+GO
+
+CREATE PROCEDURE [dbo].[SP_AddPlanSnapshot]
+    @DaysAhead INT = 30
+AS
+BEGIN
+    SET NOCOUNT ON;
+    DECLARE @CurrentMonth DATE = DATEADD(month, DATEDIFF(month, 0, GETDATE()), 0);
+    DECLARE @NextVersion INT = ISNULL((SELECT MAX([Version_Num]) FROM [dbo].[GC_PLAN_SNAPSHOT] WHERE [Report_Month] = @CurrentMonth), 0) + 1;
+
+    -- Создаем временную таблицу, строго соответствующую выходу оригинальной процедуры
+    CREATE TABLE #TempPlan (
+        [PRIOR_ID] NVARCHAR(50), [ItemCode] NVARCHAR(50), [ItemName] NVARCHAR(255),
+        [BELNR_ID] INT, [BELPOS_ID] INT, [POS_ID] INT, [RESOURCE] NVARCHAR(50),
+        [Описание станка] NVARCHAR(255), [Shift] NVARCHAR(100), [Setup_Done] NVARCHAR(100),
+        [VERURSACHER_AGBEZ] NVARCHAR(255), [VON] DATETIME, [BIS] DATETIME,
+        [Duration] FLOAT, [MENGE] FLOAT, [Plan_Qty_Details] FLOAT, [TEAPLATZ] FLOAT,
+        [TRAPLATZ] FLOAT, [gc_intensity_fact] FLOAT, [TEAPLATZ_ALT] FLOAT,
+        [Remainder_Order] FLOAT, [Price_for_1_min] FLOAT, [Narabotka_plan] FLOAT, [Date] DATE
+    );
+
+    -- Вызываем оригинальную процедуру, рассчитывающую распределение по сменам
+    INSERT INTO #TempPlan EXEC [dbo].[GetPlanReportForExell] @DaysAhead = @DaysAhead;
+
+    -- Копируем данные в постоянную таблицу с добавлением даты и версии
+    INSERT INTO [dbo].[GC_PLAN_SNAPSHOT] (
+        [Upload_Date], [Report_Month], [Version_Num], [PRIOR_ID], [ItemCode], [ItemName], 
+        [BELNR_ID], [BELPOS_ID], [POS_ID], [RESOURCE], [Описание станка], [Shift], 
+        [Setup_Done], [VERURSACHER_AGBEZ], [VON], [BIS], [Duration], [MENGE], 
+        [Plan_Qty_Details], [TEAPLATZ], [TRAPLATZ], [gc_intensity_fact], [TEAPLATZ_ALT], 
+        [Remainder_Order], [Price_for_1_min], [Narabotka_plan], [Date]
+    )
+    SELECT GETDATE(), @CurrentMonth, @NextVersion, * FROM #TempPlan;
+
+    DROP TABLE #TempPlan;
+
+    SELECT @NextVersion AS [NewVersion], @CurrentMonth AS [Month], N'Успешно создана Версия ' + CAST(@NextVersion AS NVARCHAR) AS [Message];
+END
+GO
+```
+
+#### Хранимая процедура `SP_GetProductionAnalytics`
+Обеспечивает выгрузку консолидированных данных по API. Используется Google Apps Script.
+
+```sql
+USE [GROSVER_GROUP]
+GO
+
+IF OBJECT_ID('dbo.SP_GetProductionAnalytics', 'P') IS NOT NULL 
+    DROP PROCEDURE dbo.SP_GetProductionAnalytics;
+GO
+
+SET ANSI_NULLS ON
+GO
+SET QUOTED_IDENTIFIER ON
+GO
+
+CREATE PROCEDURE [dbo].[SP_GetProductionAnalytics]
+    @DateFrom DATE,
+    @DateTo DATE,
+    @PlanVersion INT = NULL 
+AS
+BEGIN
+    SET NOCOUNT ON;
+    
+    -- Если версия не указана, берем самую свежую сохраненную версию за месяц начала периода
+    IF @PlanVersion IS NULL OR @PlanVersion = 0
+    BEGIN
+        DECLARE @Month DATE = DATEADD(month, DATEDIFF(month, 0, @DateFrom), 0);
+        SET @PlanVersion = ISNULL((SELECT MAX([Version_Num]) FROM [dbo].[GC_PLAN_SNAPSHOT] WHERE [Report_Month] = @Month), 1);
+    END
+
+    SELECT 
+        [Тип Данных], 
+        [Дата], 
+        [Смена], 
+        [Станок], 
+        [Номер документа], 
+        [Позиция], 
+        [Операция], 
+        [Артикул], 
+        [Оператор],
+        [Тип Работы], 
+        [Версия_Плана], 
+        [План_Шт], 
+        [План_Время_Мин], 
+        [Факт_Шт], 
+        [Факт_Время_Мин],
+        [Прерывания_Мин]
+    FROM [dbo].[VW_PRODUCTION_ANALYTICS]
+    WHERE [Дата] >= @DateFrom AND [Дата] <= @DateTo
+      AND ([Версия_Плана] = @PlanVersion OR [Версия_Плана] = 0)
+    ORDER BY [Дата], [Смена], [Станок];
+END
+GO
+```
+
+#### Хранимая процедура `SP_GetPlanSnapshotLogs`
+Выгружает список всех когда-либо сохраненных версий плана.
+
+```sql
+USE [GROSVER_GROUP]
+GO
+
+IF OBJECT_ID('dbo.SP_GetPlanSnapshotLogs', 'P') IS NOT NULL 
+    DROP PROCEDURE dbo.SP_GetPlanSnapshotLogs;
+GO
+
+SET ANSI_NULLS ON
+GO
+SET QUOTED_IDENTIFIER ON
+GO
+
+CREATE PROCEDURE [dbo].[SP_GetPlanSnapshotLogs]
+AS
+BEGIN
+    SET NOCOUNT ON;
+    SELECT 
+        MAX(Upload_Date) AS [Дата_Создания], 
+        Report_Month AS [Месяц], 
+        Version_Num AS [Версия] 
+    FROM [dbo].[GC_PLAN_SNAPSHOT] 
+    GROUP BY Report_Month, Version_Num 
+    ORDER BY Report_Month DESC, Version_Num DESC;
+END
+GO
+```
+
+---
+
+## Часть 2. База данных Telegram-бота (`ChecklistBot`)
+
+Выполняйте эти скрипты в СУБД бота.
+
+### 2.1. Хранимая процедура `SP_GetBotComments`
+Агрегирует данные чек-листов и текстовых комментариев, объединяя их по станкам, деталям, документам, позициям и ФИО.
+
+```sql
+USE [ChecklistBot]
+GO
+
+IF OBJECT_ID('dbo.SP_GetBotComments', 'P') IS NOT NULL 
+    DROP PROCEDURE dbo.SP_GetBotComments;
+GO
+
+SET ANSI_NULLS ON
+GO
+SET QUOTED_IDENTIFIER ON
+GO
+
+CREATE PROCEDURE [dbo].[SP_GetBotComments] AS
+BEGIN
+    SET NOCOUNT ON;
+    
+    WITH AllLogs AS (
+        SELECT 
+            r.MachineCode, 
+            CAST(r.PartNumber AS NVARCHAR(50)) AS PartNumber,
+            CAST(r.DocNumber AS NVARCHAR(50)) AS DocNumber, 
+            CAST(r.DocPosition AS NVARCHAR(50)) AS DocPosition, 
+            CAST(r.OperationNumber AS NVARCHAR(50)) AS OperationNumber,
+            RTRIM(LTRIM(r.AuthorFullName)) AS AuthorFullName,
+            RTRIM(LTRIM(r.OperationType)) AS OperationType,
+            CONCAT(N'🛠 [', FORMAT(r.CreatedAt, 'dd.MM HH:mm'), N'] Чек-лист: ', q.Text, N' - ', CASE WHEN a.IsOk = 1 THEN N'ОК' ELSE N'НЕ ОК' END, ISNULL(N' (' + a.Note + N')', N'')) AS LogText, 
+            r.CreatedAt
+        FROM [dbo].[ToolReports] r 
+        JOIN [dbo].[ToolReportAnswers] a ON r.Id = a.ReportId 
+        JOIN [dbo].[ToolQuestions] q ON a.QuestionId = q.Id
+        
+        UNION ALL
+        
+        SELECT 
+            c.MachineCode, 
+            CAST(c.PartNumber AS NVARCHAR(50)) AS PartNumber,
+            CAST(c.DocNumber AS NVARCHAR(50)), 
+            CAST(c.DocPosition AS NVARCHAR(50)), 
+            CAST(c.OperationNumber AS NVARCHAR(50)),
+            RTRIM(LTRIM(c.AuthorFullName)) AS AuthorFullName,
+            RTRIM(LTRIM(c.OperationType)) AS OperationType,
+            CONCAT(N'💬 [', FORMAT(c.CreatedAt, 'dd.MM HH:mm'), N'] Коммент: ', c.Message), 
+            c.CreatedAt
+        FROM [dbo].[Checklists] c
+    )
+    SELECT 
+        RTRIM(LTRIM(MachineCode)) AS MachineCode, 
+        RTRIM(LTRIM(PartNumber)) AS PartNumber,
+        RTRIM(LTRIM(DocNumber)) AS DocNumber, 
+        RTRIM(LTRIM(DocPosition)) AS DocPosition, 
+        RTRIM(LTRIM(OperationNumber)) AS OperationNumber,
+        RTRIM(LTRIM(AuthorFullName)) AS AuthorFullName,
+        RTRIM(LTRIM(OperationType)) AS OperationType,
+        STRING_AGG(LogText, CHAR(10)) WITHIN GROUP (ORDER BY CreatedAt) AS FullComment
+    FROM AllLogs 
+    GROUP BY MachineCode, PartNumber, DocNumber, DocPosition, OperationNumber, AuthorFullName, OperationType;
+END
+GO
+```
+
+---
+
+## Часть 3. Google Apps Script
+
+Создайте новую таблицу Google Sheets, откройте **Расширения** -> **Apps Script** и создайте два файла с указанным кодом.
+
+### 3.1. Файл `Code.gs`
+
+```javascript
+var API_URL = "https://meridian-sap-api.shares.zrok.io/api/raw-query/exec";
+var BOT_API_URL = "https://meridian-sap-api.shares.zrok.io/api/bot-query/exec";
+
+var API_OPTIONS = {
+  "method": "post",
+  "contentType": "application/json",
+  "muteHttpExceptions": true,
+  "headers": { "skip_zrok_interstitial": "true" }
+};
+
+function onOpen() {
+  var ui = SpreadsheetApp.getUi();
+  ui.createMenu('🏭 Производство')
+    .addItem('📥 1. Загрузить Аналитику (План/Факт)', 'showAnalyticsDialog')
+    .addItem('📈 2. Детальный Дашборд (По дням)', 'buildDashboard')
+    .addItem('📊 3. Общий Дашборд (Итоги + График)', 'buildAggregatedDashboard')
+    .addSeparator()
+    .addItem('💬 4. Подтянуть комментарии к дашборду', 'fetchAndApplyComments')
+    .addSeparator()
+    .addItem('📸 Создать новую версию плана (Snapshot)', 'createNewSnapshot')
+    .addItem('📖 Загрузить историю версий (Логи из БД)', 'fetchVersionLogs')
+    .addToUi();
+}
+
+function showAnalyticsDialog() {
+  var html = HtmlService.createHtmlOutputFromFile('Dialog')
+      .setWidth(350).setHeight(400).setTitle('Загрузка Аналитики');
+  SpreadsheetApp.getUi().showModalDialog(html, 'Параметры выгрузки');
+}
+
+function fetchAnalyticsData(params) {
+  var query = "EXEC [dbo].[SP_GetProductionAnalytics] @DateFrom = '" + params.dateFrom + "', @DateTo = '" + params.dateTo + "', @PlanVersion = " + (params.version || "NULL");
+  
+  var options = Object.assign({}, API_OPTIONS);
+  options.payload = JSON.stringify({ "query": query });
+
+  var response = UrlFetchApp.fetch(API_URL, options);
+  var json = JSON.parse(response.getContentText());
+  
+  if (!json.success || !json.data) {
+    throw new Error("Ответ от SQL Server:\n" + (json.error || json.message || response.getContentText()));
+  }
+  
+  var data = json.data;
+  if(data.length === 0) return "Нет данных за этот период.";
+
+  var sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName("Аналитика_Данные");
+  if (!sheet) sheet = SpreadsheetApp.getActiveSpreadsheet().insertSheet("Аналитика_Данные");
+  sheet.clear();
+
+  var headers = ["Тип Данных", "Дата", "Смена", "Станок", "Номер документа", "Позиция", "Операция", "Артикул", "Оператор", "Тип Работы", "Версия Плана", "План Шт", "План Мин", "Факт Шт", "Факт Мин", "Прерывания Мин"];
+  var rows = [headers];
+  
+  for (var i = 0; i < data.length; i++) {
+    rows.push([
+      data[i]["Тип Данных"], formatSqlDateRegex(data[i]["Дата"]), data[i]["Смена"], data[i]["Станок"],
+      data[i]["Номер документа"] || "", data[i]["Позиция"] || "", data[i]["Операция"] || "", data[i]["Артикул"] || "",
+      data[i]["Оператор"] || "", data[i]["Тип Работы"] || "", data[i]["Версия_Плана"],
+      parseNumber(data[i]["План_Шт"]), parseNumber(data[i]["План_Время_Мин"]),
+      parseNumber(data[i]["Факт_Шт"]), parseNumber(data[i]["Факт_Время_Мин"]),
+      parseNumber(data[i]["Прерывания_Мин"])
+    ]);
+  }
+
+  sheet.getRange(1, 1, rows.length, rows[0].length).setValues(rows);
+  sheet.getRange("A1:P1").setFontWeight("bold").setBackground("#d9ead3");
+  sheet.getRange(2, 2, rows.length-1, 1).setNumberFormat("dd.MM.yyyy");
+  sheet.getRange(2, 12, rows.length-1, 5).setNumberFormat("0");
+
+  return "Успешно загружено строк: " + (rows.length - 1);
+}
+
+function createNewSnapshot() {
+  var ui = SpreadsheetApp.getUi();
+  var response = ui.prompt("Снимок Плана", "На сколько дней вперед сохранить план? (по умолчанию 30):", ui.ButtonSet.OK_CANCEL);
+  if (response.getSelectedButton() !== ui.Button.OK) return;
+  var days = parseInt(response.getResponseText().trim()) || 30;
+
+  var query = "EXEC [dbo].[SP_AddPlanSnapshot] @DaysAhead = " + days;
+  var options = Object.assign({}, API_OPTIONS);
+  options.payload = JSON.stringify({ "query": query });
+
+  try {
+    var res = UrlFetchApp.fetch(API_URL, options);
+    var json = JSON.parse(res.getContentText());
+    if (json.success && json.data && json.data.length > 0) {
+      
+      var newVersion = json.data[0].NewVersion;
+      var month = formatSqlDateRegex(json.data[0].Month);
+      var message = json.data[0].Message;
+      
+      var ss = SpreadsheetApp.getActiveSpreadsheet();
+      var logSheet = ss.getSheetByName("📖 Логи Версий");
+      if (!logSheet) {
+        logSheet = ss.insertSheet("📖 Логи Версий");
+        logSheet.appendRow(["Дата и время выгрузки", "Отчетный Месяц", "Доступная Версия (План)", "Горизонт"]);
+        logSheet.getRange("A1:D1").setFontWeight("bold").setBackground("#fff2cc");
+        logSheet.setFrozenRows(1);
+      }
+      
+      var timestamp = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), "dd.MM.yyyy HH:mm:ss");
+      logSheet.appendRow([timestamp, month, newVersion, days + " дней"]);
+      logSheet.autoResizeColumns(1, 4);
+
+      ui.alert("Успех!", message + "\nМесяц: " + month + "\nЗапись добавлена в логи.", ui.ButtonSet.OK);
+    }
+  } catch (e) { ui.alert("Критическая ошибка: " + e.toString()); }
+}
+
+function buildDashboard() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var sourceSheet = ss.getSheetByName("Аналитика_Данные");
+  if (!sourceSheet) { SpreadsheetApp.getUi().alert("Сначала загрузите данные!"); return; }
+
+  var dashName = "📈 Детальный Дашборд";
+  var dashSheet = ss.getSheetByName(dashName);
+  if (dashSheet) ss.deleteSheet(dashSheet);
+  
+  dashSheet = ss.insertSheet(dashName);
+  ss.setActiveSheet(dashSheet);
+  ss.moveActiveSheet(1); 
+
+  var sourceRange = sourceSheet.getDataRange();
+  var pivotTable = dashSheet.getRange('A3').createPivotTable(sourceRange);
+
+  pivotTable.addRowGroup(2).showTotals(true);  
+  pivotTable.addRowGroup(3).showTotals(true);  
+  pivotTable.addRowGroup(4).showTotals(true);  
+  pivotTable.addRowGroup(8).showTotals(false); 
+
+  pivotTable.addPivotValue(12, SpreadsheetApp.PivotTableSummarizeFunction.SUM).setDisplayName('План (шт)');
+  pivotTable.addPivotValue(14, SpreadsheetApp.PivotTableSummarizeFunction.SUM).setDisplayName('Факт (шт)');
+  
+  try {
+    var pf = pivotTable.addCalculatedPivotValue('% Выполн.', "=IFERROR('Факт Шт' / 'План Шт'; 0)");
+    pf.setFormulaSyntax(SpreadsheetApp.PivotTableCalculatedValueFormulaSyntax.CUSTOM);
+  } catch(e) { Logger.log(e); }
+
+  pivotTable.addPivotValue(13, SpreadsheetApp.PivotTableSummarizeFunction.SUM).setDisplayName('План (мин)');
+  pivotTable.addPivotValue(15, SpreadsheetApp.PivotTableSummarizeFunction.SUM).setDisplayName('Факт (мин)');
+  pivotTable.addPivotValue(16, SpreadsheetApp.PivotTableSummarizeFunction.SUM).setDisplayName('Простой (мин)');
+
+  dashSheet.getRange("A1").setValue("Производственный Дашборд: Детальный (План / Факт / Простой)")
+           .setFontSize(14).setFontWeight("bold").setFontColor("#1a73e8");
+  dashSheet.getRange("A2").setValue("💡 Разворачивайте станок (+), чтобы увидеть детализацию по артикулам")
+           .setFontStyle("italic").setFontColor("#5f6368");
+
+  dashSheet.setColumnWidth(1, 100); dashSheet.setColumnWidth(2, 70);
+  dashSheet.setColumnWidth(3, 110); dashSheet.setColumnWidth(4, 150);
+  dashSheet.getRange("E:J").setNumberFormat('[=0]"";#,##0'); 
+  dashSheet.getRange("G:G").setNumberFormat('[=0]"";0%'); 
+  dashSheet.setFrozenRows(3);
+}
+
+function buildAggregatedDashboard() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var sourceSheet = ss.getSheetByName("Аналитика_Данные");
+  if (!sourceSheet) { SpreadsheetApp.getUi().alert("Сначала загрузите данные!"); return; }
+
+  var dashName = "📊 Общий Дашборд";
+  var dashSheet = ss.getSheetByName(dashName);
+  if (dashSheet) ss.deleteSheet(dashSheet);
+  
+  dashSheet = ss.insertSheet(dashName);
+  ss.setActiveSheet(dashSheet);
+  ss.moveActiveSheet(2); 
+
+  var sourceRange = sourceSheet.getDataRange();
+  var pivotTable = dashSheet.getRange('A3').createPivotTable(sourceRange);
+
+  pivotTable.addRowGroup(8).showTotals(true);  
+  pivotTable.addRowGroup(5).showTotals(false); 
+
+  pivotTable.addPivotValue(12, SpreadsheetApp.PivotTableSummarizeFunction.SUM).setDisplayName('Всего План (шт)'); 
+  pivotTable.addPivotValue(14, SpreadsheetApp.PivotTableSummarizeFunction.SUM).setDisplayName('Всего Факт (шт)'); 
+  
+  try {
+    var pf = pivotTable.addCalculatedPivotValue('% Выполн.', "=IFERROR('Факт Шт' / 'План Шт'; 0)");
+    pf.setFormulaSyntax(SpreadsheetApp.PivotTableCalculatedValueFormulaSyntax.CUSTOM);
+  } catch(e) { Logger.log(e); }
+
+  pivotTable.addPivotValue(13, SpreadsheetApp.PivotTableSummarizeFunction.SUM).setDisplayName('Всего План (мин)'); 
+  pivotTable.addPivotValue(15, SpreadsheetApp.PivotTableSummarizeFunction.SUM).setDisplayName('Всего Факт (мин)'); 
+  pivotTable.addPivotValue(16, SpreadsheetApp.PivotTableSummarizeFunction.SUM).setDisplayName('Всего Простой (мин)'); 
+
+  dashSheet.getRange("A1").setValue("Агрегированный Дашборд: Итоги за выбранный период")
+           .setFontSize(14).setFontWeight("bold").setFontColor("#b31412");
+  dashSheet.getRange("A2").setValue("💡 Разворачивайте Деталь (+), чтобы увидеть номера Документов")
+           .setFontStyle("italic").setFontColor("#5f6368");
+
+  dashSheet.setColumnWidth(1, 200); dashSheet.setColumnWidth(2, 130);  
+  dashSheet.setColumnWidth(3, 110); dashSheet.setColumnWidth(4, 110); 
+  dashSheet.setColumnWidth(5, 100); dashSheet.setColumnWidth(6, 110); 
+  dashSheet.setColumnWidth(7, 110); dashSheet.setColumnWidth(8, 130); 
+
+  dashSheet.getRange("C:H").setNumberFormat('[=0]"";#,##0'); 
+  dashSheet.getRange("E:E").setNumberFormat('[=0]"";0%'); 
+  dashSheet.setFrozenRows(3);
+
+  SpreadsheetApp.flush();
+  var lastRow = dashSheet.getLastRow();
+  
+  if (lastRow > 4) {
+    var chart = dashSheet.newChart()
+      .asColumnChart()
+      .addRange(dashSheet.getRange(3, 1, lastRow - 3, 1))
+      .addRange(dashSheet.getRange(3, 3, lastRow - 3, 2))
+      .setNumHeaders(1)
+      .setOption('title', 'Сравнение: План vs Факт по деталям')
+      .setOption('hAxis.title', 'Артикул')
+      .setOption('vAxis.title', 'Кол-во (шт)')
+      .setOption('legend', {position: 'top'})
+      .setOption('colors', ['#4285F4', '#34A853'])
+      .setPosition(3, 10, 0, 0)
+      .setOption('width', 800)
+      .setOption('height', 450)
+      .build();
+      
+    dashSheet.insertChart(chart);
+  }
+}
+
+function fetchVersionLogs() {
+  var ui = SpreadsheetApp.getUi();
+  var query = "EXEC [dbo].[SP_GetPlanSnapshotLogs]";
+  var options = Object.assign({}, API_OPTIONS);
+  options.payload = JSON.stringify({ "query": query });
+
+  try {
+    var res = UrlFetchApp.fetch(API_URL, options);
+    var json = JSON.parse(res.getContentText());
+    
+    if (!json.success || !json.data) throw new Error(json.error || json.message || res.getContentText());
+    
+    var data = json.data;
+    if (data.length === 0) {
+      ui.alert("В базе данных пока нет сохраненных версий.");
+      return;
+    }
+
+    var ss = SpreadsheetApp.getActiveSpreadsheet();
+    var logSheet = ss.getSheetByName("📖 Логи Версий");
+    if (!logSheet) logSheet = ss.insertSheet("📖 Логи Версий");
+    
+    logSheet.clear();
+    var rows = [["Дата и время выгрузки (в базе)", "Отчетный Месяц", "Доступная Версия (План)"]];
+    for (var i = 0; i < data.length; i++) {
+      var uploadDate = data[i]["Дата_Создания"] ? data[i]["Дата_Создания"].toString().replace('T', ' ').substring(0, 19) : "";
+      var reportMonth = formatSqlDateRegex(data[i]["Месяц"]);
+      rows.push([uploadDate, reportMonth, data[i]["Версия"]]);
+    }
+    
+    logSheet.getRange(1, 1, rows.length, 3).setValues(rows);
+    logSheet.getRange("A1:C1").setFontWeight("bold").setBackground("#fff2cc");
+    logSheet.autoResizeColumns(1, 3);
+    
+    ui.alert("Логи успешно восстановлены!");
+  } catch (e) { ui.alert("Ошибка: " + e.toString()); }
+}
+
+function fetchAndApplyComments() {
+  var ui = SpreadsheetApp.getUi();
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var sheet = ss.getActiveSheet();
+  var sheetName = sheet.getName();
+
+  if (sheetName !== "📈 Детальный Дашборд" && sheetName !== "📊 Общий Дашборд") {
+    ui.alert("Откройте '📈 Детальный Дашборд' или '📊 Общий Дашборд', чтобы загрузить комментарии.");
+    return;
+  }
+
+  var rawSheet = ss.getSheetByName("Аналитика_Данные");
+  if (!rawSheet) {
+    ui.alert("Отсутствует лист с сырыми данными 'Аналитика_Данные'.");
+    return;
+  }
+
+  try {
+    var query = "EXEC [dbo].[SP_GetBotComments]";
+    var options = Object.assign({}, API_OPTIONS);
+    options.payload = JSON.stringify({ "query": query });
+
+    var response = UrlFetchApp.fetch(BOT_API_URL, options);
+    var json = JSON.parse(response.getContentText());
+    
+    if (!json.success || !json.data) throw new Error(json.error || json.message || response.getContentText());
+    var botComments = json.data;
+
+    var rawValues = rawSheet.getDataRange().getValues();
+
+    var dataRange = sheet.getDataRange();
+    var values = dataRange.getValues();
+    var lastCol = sheet.getLastColumn();
+
+    var commentColIndex = -1;
+    for (var c = 0; c < lastCol; c++) {
+      if (values[2] && values[2][c] === "Комментарии из Бота") {
+        commentColIndex = c; 
+        break;
+      }
+    }
+    if (commentColIndex === -1) {
+      commentColIndex = lastCol;
+      sheet.getRange(3, commentColIndex + 1).setValue("Комментарии из Бота")
+           .setFontWeight("bold").setBackground("#fff2cc").setHorizontalAlignment("center");
+      sheet.setColumnWidth(commentColIndex + 1, 380);
+    }
+
+    if (sheet.getLastRow() > 3) {
+      sheet.getRange(4, commentColIndex + 1, sheet.getLastRow() - 3, 1).clearContent();
+    }
+
+    var commentsToWrite = [];
+    var currentDate = "";
+    var currentShift = "";
+    var currentMachine = "";
+    var currentArticle = "";
+
+    for (var i = 3; i < values.length; i++) {
+      var rowComments = [];
+      var isTotalRow = values[i].join("").indexOf("Всего") > -1 || values[i].join("").indexOf("Итого") > -1;
+
+      if (!isTotalRow) {
+        if (sheetName === "📈 Детальный Дашборд") {
+          var dateCell    = values[i][0]; 
+          var shiftCell   = values[i][1]; 
+          var machineCell = values[i][2]; 
+          var articleCell = values[i][3]; 
+
+          if (dateCell !== "")    currentDate = formatDateValue(dateCell);
+          if (shiftCell !== "")   currentShift = String(shiftCell).trim();
+          if (machineCell !== "") currentMachine = String(machineCell).trim();
+          var article = String(articleCell).trim();
+
+          if (article !== "" && article.indexOf("Общий простой") === -1) {
+            var contexts = getContextForDetailed(rawValues, currentDate, currentShift, currentMachine, article);
+            
+            contexts.forEach(function(ctx) {
+              var matched = botComments.filter(function(bot) {
+                return bot.MachineCode === currentMachine &&
+                       bot.DocNumber === ctx.docNo &&
+                       bot.DocPosition === ctx.posNo &&
+                       bot.OperationNumber === ctx.opNo &&
+                       isNameMatch(ctx.operator, bot.AuthorFullName) &&
+                       bot.OperationType === ctx.opType;
+              });
+
+              matched.forEach(function(m) {
+                rowComments.push("👤 Оператор: " + ctx.operator + " (" + ctx.opType + ") (Док. " + ctx.docNo + ", Поз. " + ctx.posNo + ", Оп. " + ctx.opNo + "):\n" + m.FullComment);
+              });
+            });
+          }
+        } 
+        else if (sheetName === "📊 Общий Дашборд") {
+          var articleCell = values[i][0]; 
+          var docCell     = values[i][1]; 
+
+          if (articleCell !== "") currentArticle = String(articleCell).trim();
+          var docNo = String(docCell).trim();
+
+          if (docNo !== "" && docNo.indexOf("Всего") === -1 && docNo.indexOf("Общий простой") === -1) {
+            var contexts = getContextForAggregated(rawValues, currentArticle, docNo);
+            
+            contexts.forEach(function(ctx) {
+              var matched = botComments.filter(function(bot) {
+                return bot.MachineCode === ctx.machine &&
+                       bot.DocNumber === docNo &&
+                       bot.DocPosition === ctx.posNo &&
+                       bot.OperationNumber === ctx.opNo &&
+                       isNameMatch(ctx.operator, bot.AuthorFullName) &&
+                       bot.OperationType === ctx.opType;
+              });
+
+              matched.forEach(function(m) {
+                rowComments.push("👤 Оператор: " + ctx.operator + " (" + ctx.opType + ") (Станок " + ctx.machine + ", Поз. " + ctx.posNo + ", Оп. " + ctx.opNo + "):\n" + m.FullComment);
+              });
+            });
+          }
+        }
+      }
+
+      commentsToWrite.push([rowComments.join("\n\n──────────────────\n\n")]);
+    }
+
+    if (commentsToWrite.length > 0) {
+      var targetRange = sheet.getRange(4, commentColIndex + 1, commentsToWrite.length, 1);
+      targetRange.setValues(commentsToWrite);
+      targetRange.setWrapStrategy(SpreadsheetApp.WrapStrategy.CLIP);
+      targetRange.setVerticalAlignment("center");
+    }
+
+    ui.alert("✅ Готово!", "Комментарии успешно сопоставлены по станкам, документам, позициям, операциям, ФИО и типу работы.", ui.ButtonSet.OK);
+
+  } catch (e) {
+    ui.alert("❌ Ошибка выполнения: " + e.toString());
+  }
+}
+
+function getContextForDetailed(rawValues, targetDateStr, targetShift, targetMachine, targetArticle) {
+  var results = [];
+  var seenKeys = {};
+
+  for (var i = 1; i < rawValues.length; i++) {
+    var rawRow = rawValues[i];
+    var rawDate = formatDateValue(rawRow[1]);
+    var rawShift = String(rawRow[2]).trim();
+    var rawMachine = String(rawRow[3]).trim(); 
+    var rawArticle = String(rawRow[7]).trim(); 
+    
+    if (rawDate === targetDateStr && rawShift === targetShift && rawMachine === targetMachine && rawArticle === targetArticle) {
+      var docNo = String(rawRow[4]).trim();
+      var posNo = String(rawRow[5]).trim();
+      var opNo = String(rawRow[6]).trim();
+      var operator = String(rawRow[8]).trim();
+      var opType = String(rawRow[9]).trim(); 
+      
+      var key = docNo + "_" + posNo + "_" + opNo + "_" + operator + "_" + opType;
+      if (!seenKeys[key] && docNo !== "" && docNo !== "Вне документа") {
+        seenKeys[key] = true;
+        results.push({ docNo: docNo, posNo: posNo, opNo: opNo, operator: operator, opType: opType });
+      }
+    }
+  }
+  return results;
+}
+
+function getContextForAggregated(rawValues, targetArticle, targetDocNo) {
+  var results = [];
+  var seenKeys = {};
+
+  for (var i = 1; i < rawValues.length; i++) {
+    var rawRow = rawValues[i];
+    var rawArticle = String(rawRow[7]).trim();
+    var rawDocNo = String(rawRow[4]).trim();
+    
+    if (rawArticle === targetArticle && rawDocNo === targetDocNo) {
+      var machine = String(rawRow[3]).trim();
+      var posNo = String(rawRow[5]).trim();
+      var opNo = String(rawRow[6]).trim();
+      var operator = String(rawRow[8]).trim();
+      var opType = String(rawRow[9]).trim(); 
+      
+      var key = machine + "_" + posNo + "_" + opNo + "_" + operator + "_" + opType;
+      if (!seenKeys[key] && machine !== "") {
+        seenKeys[key] = true;
+        results.push({ machine: machine, posNo: posNo, opNo: opNo, operator: operator, opType: opType });
+      }
+    }
+  }
+  return results;
+}
+
+function isNameMatch(nameSAP, nameBot) {
+  if (!nameSAP || !nameBot) return false;
+  
+  var s = String(nameSAP).toLowerCase().trim();
+  var b = String(nameBot).toLowerCase().trim();
+  
+  if (s === b) return true;
+  
+  var cleanS = s.replace(/[.,]/g, " ");
+  var cleanB = b.replace(/[.,]/g, " ");
+  
+  var wordsS = cleanS.split(/\s+/).filter(Boolean);
+  var wordsB = cleanB.split(/\s+/).filter(Boolean);
+  
+  if (wordsS.length === 0 || wordsB.length === 0) return false;
+  
+  var lastNameS = wordsS[0];
+  var lastNameB = wordsB[0];
+  
+  if (lastNameS.length > 2 && lastNameS === lastNameB) return true;
+  
+  for (var i = 0; i < wordsS.length; i++) {
+    for (var j = 0; j < wordsB.length; j++) {
+      if (wordsS[i].length > 3 && wordsS[i] === wordsB[j]) {
+        return true;
+      }
+    }
+  }
+  
+  return false;
+}
+
+function formatDateValue(val) {
+  if (!val) return "";
+  if (val instanceof Date) {
+    return Utilities.formatDate(val, Session.getScriptTimeZone(), "dd.MM.yyyy");
+  }
+  var s = val.toString().trim();
+  var matchYmd = s.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (matchYmd) {
+    return matchYmd[3] + "." + matchYmd[2] + "." + matchYmd[1];
+  }
+  var matchDmy = s.match(/^(\d{2})\.(\d{2})\.(\d{4})/);
+  if (matchDmy) {
+    return s.substring(0, 10);
+  }
+  return s;
+}
+
+function formatSqlDateRegex(sqlDateStr) {
+  if (!sqlDateStr) return '';
+  var match = sqlDateStr.toString().match(/(\d{4})-(\d{2})-(\d{2})/);
+  return match ? match[3] + "." + match[2] + "." + match[1] : sqlDateStr;
+}
+
+function parseNumber(val) {
+  if (!val) return 0;
+  return parseFloat(val.toString().replace(',', '.')) || 0;
+}
+```
+
+### 3.2. Файл `Dialog.html`
+
+```html
+<!DOCTYPE html>
+<html>
+  <head>
+    <base target="_top">
+    <style>
+      body { font-family: 'Segoe UI', Tahoma, Arial, sans-serif; padding: 20px; background-color: #f8f9fa; }
+      .form-group { margin-bottom: 15px; }
+      label { display: block; font-weight: bold; margin-bottom: 5px; color: #333; font-size: 14px; }
+      input[type="date"], input[type="number"] { width: 100%; padding: 8px; border: 1px solid #ccc; border-radius: 4px; box-sizing: border-box; }
+      .btn { background-color: #1a73e8; color: white; border: none; padding: 10px 15px; border-radius: 4px; cursor: pointer; width: 100%; font-weight: bold; font-size: 14px; }
+      .btn:hover { background-color: #1557b0; }
+      #status { margin-top: 15px; font-size: 13px; color: #d93025; text-align: center; }
+      .spinner { display: none; margin: 0 auto; border: 4px solid #f3f3f3; border-top: 4px solid #1a73e8; border-radius: 50%; width: 24px; height: 24px; animation: spin 1s linear infinite; }
+      @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+    </style>
+  </head>
+  <body>
+    <div class="form-group">
+      <label>Дата С (От):</label>
+      <input type="date" id="dateFrom" required>
+    </div>
+    <div class="form-group">
+      <label>Дата По (До):</label>
+      <input type="date" id="dateTo" required>
+    </div>
+    <div class="form-group">
+      <label>Версия Плана (0 = Последняя):</label>
+      <input type="number" id="version" value="0" min="0">
+    </div>
+    
+    <button class="btn" onclick="submitForm()">Загрузить Аналитику</button>
+    
+    <div style="margin-top: 15px; text-align: center;">
+      <div class="spinner" id="spinner"></div>
+      <div id="status"></div>
+    </div>
+
+    <script>
+      var d = new Date();
+      document.getElementById('dateFrom').value = new Date(d.getFullYear(), d.getMonth(), 2).toISOString().split('T')[0];
+      document.getElementById('dateTo').value = new Date(d.getFullYear(), d.getMonth() + 1, 1).toISOString().split('T')[0];
+
+      function submitForm() {
+        document.getElementById('spinner').style.display = 'block';
+        document.getElementById('status').innerText = 'Загрузка с сервера...';
+        var params = {
+          dateFrom: document.getElementById('dateFrom').value,
+          dateTo: document.getElementById('dateTo').value,
+          version: document.getElementById('version').value
+        };
+        google.script.run
+          .withSuccessHandler(function(res) {
+            document.getElementById('spinner').style.display = 'none';
+            document.getElementById('status').style.color = '#188038';
+            document.getElementById('status').innerText = res;
+            setTimeout(function() { google.script.host.close(); }, 1500);
+          })
+          .withFailureHandler(function(err) {
+            document.getElementById('spinner').style.display = 'none';
+            document.getElementById('status').style.color = '#d93025';
+            document.getElementById('status').innerText = err.message;
+          })
+          .fetchAnalyticsData(params);
+      }
+    </script>
+  </body>
+</html>
+```
+
+---
+
+## Часть 4. Инструкция по развертыванию при аварийном восстановлении
+
+Если база данных или Google Таблица были полностью уничтожены, выполните следующие действия:
+
+1. **Развертывание баз данных:**
+   * В СУБД на сервере SAP B1 создайте пустую таблицу снимков и выполните код из глав `1.1`, `1.2` и `1.3` (база `GROSVER_GROUP`).
+   * В СУБД на сервере Telegram-бота откройте базу данных `ChecklistBot` и создайте процедуру из главы `2.1`.
+2. **Создание новой Google Таблицы:**
+   * Создайте пустую книгу Google Таблиц.
+   * Откройте меню **Расширения** -> **Apps Script**.
+   * Создайте файл скрипта `Code.gs` и скопируйте туда код из главы `3.1`.
+   * Создайте HTML-файл, назовите его ровно `Dialog` (Google автоматически добавит расширение `.html`), и скопируйте туда код из главы `3.2`.
+   * Перезагрузите страницу Google Таблицы. В верхнем меню появится пункт **`🏭 Производство`**.
+3. **Первичный импорт данных:**
+   * Сделайте первый снимок текущего плана: **`🏭 Производство`** -> **`📸 Создать новую версию плана (Snapshot)`**.
+   * Импортируйте данные: **`🏭 Производство`** -> **`📥 1. Загрузить Аналитику (План/Факт)`** (будет автоматически создан лист `Аналитика_Данные`).
+   * Сформируйте дашборды: выберите пункты **`2`** и **`3`** в меню.
+   * Нажмите **`💬 4. Подтянуть комментарии к дашборду`**, чтобы подтянуть чек-листы и текстовые отчеты операторов.
