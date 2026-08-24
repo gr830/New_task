@@ -4592,3 +4592,93 @@ WHERE i.Дата >= DATEFROMPARTS(YEAR(GETDATE()), 1, 1);
 GO
 ```
 
+## Обновляем процедуру логов
+
+```sql
+USE [GROSVER_GROUP]
+GO
+
+SET ANSI_NULLS ON
+GO
+SET QUOTED_IDENTIFIER ON
+GO
+
+ALTER PROCEDURE [dbo].[SP_GetPlanSnapshotLogs]
+AS
+BEGIN
+    SET NOCOUNT ON;
+
+    SELECT 
+        MAX(Upload_Date) AS [Дата_Создания], 
+        Report_Month AS [Месяц], 
+        Version_Num AS [Версия],
+        MIN([Date]) AS [Начало_Плана],   -- Берем самую раннюю дату в версии
+        MAX([Date]) AS [Конец_Плана]     -- Берем самую позднюю дату в версии
+    FROM [dbo].[GC_PLAN_SNAPSHOT] 
+    GROUP BY Report_Month, Version_Num 
+    ORDER BY Report_Month DESC, Version_Num DESC;
+END
+GO
+```
+
+```js
+function fetchVersionLogs() {
+  var ui = SpreadsheetApp.getUi();
+  var query = "EXEC [dbo].[SP_GetPlanSnapshotLogs]";
+  
+  var options = Object.assign({}, API_OPTIONS);
+  options.payload = JSON.stringify({ "query": query });
+
+  try {
+    var res = UrlFetchApp.fetch(API_URL, options);
+    var json = JSON.parse(res.getContentText());
+    
+    if (!json.success || !json.data) {
+      throw new Error(json.error || json.message || res.getContentText());
+    }
+    
+    var data = json.data;
+    if (data.length === 0) {
+      ui.alert("В базе данных пока нет ни одной сохраненной версии плана.");
+      return;
+    }
+
+    var ss = SpreadsheetApp.getActiveSpreadsheet();
+    var logSheet = ss.getSheetByName("📖 Логи Версий");
+    if (!logSheet) logSheet = ss.insertSheet("📖 Логи Версий");
+    
+    logSheet.clear(); // Очищаем старое перед перезаписью
+    
+    // Новая структура заголовков: Реальный период плана
+    var rows = [["Дата и время выгрузки (в базе)", "Период плана (С - По)", "Отчетный Месяц", "Доступная Версия (План)"]];
+    
+    for (var i = 0; i < data.length; i++) {
+      var uploadDate = data[i]["Дата_Создания"] ? data[i]["Дата_Создания"].toString().replace('T', ' ').substring(0, 19) : "";
+      var reportMonth = formatSqlDateRegex(data[i]["Месяц"]);
+      
+      // Формируем красивую строку периода (например: 21.08.2026 - 26.08.2026)
+      var dateStart = formatSqlDateRegex(data[i]["Начало_Плана"]);
+      var dateEnd = formatSqlDateRegex(data[i]["Конец_Плана"]);
+      var planPeriod = (dateStart && dateEnd) ? (dateStart + " - " + dateEnd) : "Не определен";
+      
+      rows.push([
+        uploadDate, 
+        planPeriod, // Записываем период во 2-й столбец
+        reportMonth, 
+        data[i]["Версия"]
+      ]);
+    }
+    
+    logSheet.getRange(1, 1, rows.length, 4).setValues(rows);
+    logSheet.getRange("A1:D1").setFontWeight("bold").setBackground("#fff2cc");
+    logSheet.autoResizeColumns(1, 4);
+    
+    ui.alert("📖 Логи версий успешно обновлены!");
+    
+  } catch (e) {
+    ui.alert("Ошибка загрузки логов: " + e.toString());
+  }
+}
+```
+
+
