@@ -5468,5 +5468,323 @@ function trimArticleForChart(article) {
   }
   return s;
 }
+
+function fetchVersionLogs() {
+  var ui = SpreadsheetApp.getUi();
+  var query = "EXEC [dbo].[SP_GetPlanSnapshotLogs]";
+  
+  var options = Object.assign({}, API_OPTIONS);
+  options.payload = JSON.stringify({ "query": query });
+
+  try {
+    var res = UrlFetchApp.fetch(API_URL, options);
+    var json = JSON.parse(res.getContentText());
+    
+    if (!json.success || !json.data) {
+      throw new Error(json.error || json.message || res.getContentText());
+    }
+    
+    var data = json.data;
+    if (data.length === 0) {
+      ui.alert("В базе данных пока нет ни одной сохраненной версии плана.");
+      return;
+    }
+
+    var ss = SpreadsheetApp.getActiveSpreadsheet();
+    var logSheet = ss.getSheetByName("📖 Логи Версий");
+    if (!logSheet) logSheet = ss.insertSheet("📖 Логи Версий");
+    
+    logSheet.clear(); // Очищаем старое перед перезаписью
+    
+    // Новая структура заголовков: Реальный период плана
+    var rows = [["Дата и время выгрузки (в базе)", "Период плана (С - По)", "Отчетный Месяц", "Доступная Версия (План)"]];
+    
+    for (var i = 0; i < data.length; i++) {
+      var uploadDate = data[i]["Дата_Создания"] ? data[i]["Дата_Создания"].toString().replace('T', ' ').substring(0, 19) : "";
+      var reportMonth = formatSqlDateRegex(data[i]["Месяц"]);
+      
+      // Формируем красивую строку периода (например: 21.08.2026 - 26.08.2026)
+      var dateStart = formatSqlDateRegex(data[i]["Начало_Плана"]);
+      var dateEnd = formatSqlDateRegex(data[i]["Конец_Плана"]);
+      var planPeriod = (dateStart && dateEnd) ? (dateStart + " - " + dateEnd) : "Не определен";
+      
+      rows.push([
+        uploadDate, 
+        planPeriod, // Записываем период во 2-й столбец
+        reportMonth, 
+        data[i]["Версия"]
+      ]);
+    }
+    
+    logSheet.getRange(1, 1, rows.length, 4).setValues(rows);
+    logSheet.getRange("A1:D1").setFontWeight("bold").setBackground("#fff2cc");
+    logSheet.autoResizeColumns(1, 4);
+    
+    ui.alert("📖 Логи версий успешно обновлены!");
+    
+  } catch (e) {
+    ui.alert("Ошибка загрузки логов: " + e.toString());
+  }
+}
 ```
 
+# 📌 ОБНОВЛЕНИЕ ОТ 02.09.2026 — АУДИТ КОРРЕКТНОСТИ И ИСПРАВЛЕНИЯ
+
+Проведен сквозной аудит цепочки «Гант → снапшот → представление → выгрузка → дашборды».
+Обнаружены и устранены **три дефекта расчета**. Ниже — что именно заменено и чем.
+
+## 0. Сводная таблица изменений
+
+| № | Дефект (было) | Последствие | Исправление | Где в документации менять |
+|---|---|---|---|---|
+| 1 | В `GC_PLAN_SNAPSHOT.Duration` у старых версий плана стояла константа **720** на каждую строку (процедура-источник писала длительность всей смены вместо куска) | «План (мин)» = 79 920 вместо реальных ~36,6 тыс.; на станок/смену выходило 1440+ мин | Разовый ремонт `Duration` обратным расчетом `шт × Тшт + наладка из статуса` (новый раздел **1.4**) | Добавить раздел 1.4 |
+| 2 | В представлении факт-минуты считались `CASE WHEN [End Time] > [Start Time] THEN DATEDIFF(...) ELSE 0` | Все ночные операции через полночь (18:56→03:33) обнулялись: «Факт (мин)» = 21 283 вместо 33 376 | `+1440` минут при пересечении полуночи (замена в разделе **1.2**) | Заменить код в разделе 1.2 |
+| 3 | Классификатор `LIKE N'%наладка%'` помечал как «Наладка» ВСЕ плановые строки, включая «наладка завершена» | Колонка «Тип Работы» у плана не несла смысла | Трехветвевой `CASE` с приоритетом «завершена / идет обработка → Обработка» (замена в разделе **1.2**) | Заменить код в разделе 1.2 |
+
+**Что НЕ менялось:** `GetPlanReportForExell` (текущая версия уже корректна), `SP_AddPlanSnapshot`,
+`SP_GetProductionAnalytics`, `SP_GetPlanSnapshotLogs`, `SP_GetBotComments`, весь Google Apps Script,
+API-сервер, база `ChecklistBot`.
+
+---
+
+## 1. ЗАМЕНА №1 — раздел «1.2. Создание консолидирующего аналитического представления»
+
+### 1.1. Что заменяется (старые фрагменты, которые были в разделе 1.2)
+
+**Было (срез ПЛАН, классификатор типа работы):**
+```sql
+CASE WHEN p.Setup_Done LIKE N'%наладка%' THEN N'Наладка' ELSE N'Обработка' END AS [Тип Работы],
+```
+**Стало:**
+```sql
+CASE
+    WHEN p.Setup_Done LIKE N'%наладка завершена%' THEN N'Обработка'
+    WHEN p.Setup_Done LIKE N'%Идет обработка%'    THEN N'Обработка'
+    WHEN p.Setup_Done LIKE N'%наладка%'           THEN N'Наладка'
+    ELSE N'Обработка'
+END AS [Тип Работы],
+```
+
+**Было (срез ФАКТ, минуты — обнуляли ночь):**
+```sql
+CAST(ROUND(CASE WHEN f.[End Time] > f.[Start Time]
+                THEN DATEDIFF(MINUTE, f.[Start Time], f.[End Time]) ELSE 0 END, 0) AS INT) AS [Факт_Время_Мин],
+```
+**Стало (пересечение полуночи = +1440 мин):**
+```sql
+CAST(CASE WHEN f.[End Time] >= f.[Start Time]
+          THEN DATEDIFF(MINUTE, f.[Start Time], f.[End Time])
+          ELSE DATEDIFF(MINUTE, f.[Start Time], f.[End Time]) + 1440
+     END AS INT) AS [Факт_Время_Мин],
+```
+
+**Было (срез ФАКТ, штуки — сторно исчезало из итогов):**
+```sql
+CAST(ROUND(CASE WHEN f.Kol_detalej > 0 THEN f.Kol_detalej ELSE 0 END, 0) AS INT) AS [Факт_Шт],
+```
+**Стало (сторно вычитается; если бизнес решит игнорировать брак — вернуть `ELSE 0` и убрать минус):**
+```sql
+CASE WHEN f.Kol_detalej > 0 THEN CAST(ROUND(f.Kol_detalej, 0) AS INT)
+     WHEN f.Kol_detalej < 0 THEN -CAST(ROUND(ABS(f.Kol_detalej), 0) AS INT)
+     ELSE 0 END AS [Факт_Шт],
+```
+
+### 1.2. Новый полный код представления (заменяет ВЕСЬ старый код-блок раздела 1.2)
+
+```sql
+USE [GROSVER_GROUP]
+GO
+IF OBJECT_ID('dbo.VW_PRODUCTION_ANALYTICS', 'V') IS NOT NULL
+    DROP VIEW dbo.VW_PRODUCTION_ANALYTICS;
+GO
+CREATE VIEW [dbo].[VW_PRODUCTION_ANALYTICS] AS
+-- =========================================================================
+-- 1. СРЕЗ: ПЛАН
+--    Duration берется из отремонтированного снапшота (см. раздел 1.4).
+--    Классификатор наладки: «завершена» и «идет обработка» = Обработка.
+-- =========================================================================
+SELECT DISTINCT
+    N'План' AS [Тип Данных],
+    CONVERT(DATE, RIGHT(RTRIM(p.[Shift]), 10), 104) AS [Дата],
+    CAST(LEFT(RTRIM(p.[Shift]), 1) AS INT) AS [Смена],
+    RTRIM(LTRIM(p.RESOURCE)) AS [Станок],
+    RTRIM(LTRIM(CAST(p.BELNR_ID AS NVARCHAR(50)))) AS [Номер документа],
+    RTRIM(LTRIM(CAST(p.BELPOS_ID AS NVARCHAR(50)))) AS [Позиция],
+    RTRIM(LTRIM(CAST(p.POS_ID AS NVARCHAR(50)))) AS [Операция],
+    RTRIM(LTRIM(p.ItemCode)) AS [Артикул],
+    NULL AS [Оператор],
+    CASE
+        WHEN p.Setup_Done LIKE N'%наладка завершена%' THEN N'Обработка'
+        WHEN p.Setup_Done LIKE N'%Идет обработка%'    THEN N'Обработка'
+        WHEN p.Setup_Done LIKE N'%наладка%'           THEN N'Наладка'
+        ELSE N'Обработка'
+    END AS [Тип Работы],
+    p.[Version_Num] AS [Версия_Плана],
+    CAST(ROUND(ISNULL(p.Plan_Qty_Details, 0), 0) AS INT) AS [План_Шт],
+    CAST(ROUND(ISNULL(p.Duration, 0), 0) AS INT) AS [План_Время_Мин],
+    0 AS [Факт_Шт],
+    0 AS [Факт_Время_Мин],
+    0 AS [Прерывания_Мин],
+    CAST(ISNULL(p.TEAPLATZ, 0) AS FLOAT) AS [Тшт_План],
+    CAST(0 AS FLOAT) AS [Тшт_Факт],
+    NULL AS [Тип_Прерывания],
+    NULL AS [Комментарий_Прерывания]
+FROM [dbo].[GC_PLAN_SNAPSHOT] p
+WHERE ISNULL(p.Duration, 0) > 0
+UNION ALL
+-- =========================================================================
+-- 2. СРЕЗ: ФАКТ
+--    Ночь через полночь: DATEDIFF + 1440. Сторно уходит в минус.
+-- =========================================================================
+SELECT
+    CASE WHEN f.Kol_detalej < 0 THEN N'Факт (Брак/Сторно)' ELSE N'Факт' END AS [Тип Данных],
+    f.Date AS [Дата],
+    CAST(f.[Shift] AS INT) AS [Смена],
+    RTRIM(LTRIM(f.APLATZ_ID)) AS [Станок],
+    RTRIM(LTRIM(CAST(f.BELNR_ID AS NVARCHAR(50)))) AS [Номер документа],
+    RTRIM(LTRIM(CAST(f.BELPOS_ID AS NVARCHAR(50)))) AS [Позиция],
+    RTRIM(LTRIM(CAST(f.POS_ID AS NVARCHAR(50)))) AS [Операция],
+    RTRIM(LTRIM(f.ItemCode)) AS [Артикул],
+    RTRIM(LTRIM(f.DisplayName)) AS [Оператор],
+    CASE WHEN f.TYP = 'R' THEN N'Наладка' ELSE N'Обработка' END AS [Тип Работы],
+    0 AS [Версия_Плана],
+    0 AS [План_Шт],
+    0 AS [План_Время_Мин],
+    CASE WHEN f.Kol_detalej > 0 THEN CAST(ROUND(f.Kol_detalej, 0) AS INT)
+         WHEN f.Kol_detalej < 0 THEN -CAST(ROUND(ABS(f.Kol_detalej), 0) AS INT)
+         ELSE 0 END AS [Факт_Шт],
+    CAST(CASE WHEN f.[End Time] >= f.[Start Time]
+              THEN DATEDIFF(MINUTE, f.[Start Time], f.[End Time])
+              ELSE DATEDIFF(MINUTE, f.[Start Time], f.[End Time]) + 1440
+         END AS INT) AS [Факт_Время_Мин],
+    0 AS [Прерывания_Мин],
+    CAST(0 AS FLOAT) AS [Тшт_План],
+    CAST(CASE WHEN f.TYP = 'A' THEN ISNULL(f.Norma, 0) ELSE 0 END AS FLOAT) AS [Тшт_Факт],
+    NULL AS [Тип_Прерывания],
+    NULL AS [Комментарий_Прерывания]
+FROM [dbo].[GC_FACT_FINANCIAL_REPORT] f
+WHERE f.[Start Time] IS NOT NULL AND f.[End Time] IS NOT NULL
+UNION ALL
+-- =========================================================================
+-- 3. СРЕЗ: ПРЕРЫВАНИЯ (без изменений: OUTER APPLY против дублей,
+--    справочник причин, ночное правило даты)
+-- =========================================================================
+SELECT
+    N'Прерывание' AS [Тип Данных],
+    i.Дата, CAST(i.Смена AS INT), RTRIM(LTRIM(i.APLATZ_ID)),
+    ISNULL(RTRIM(LTRIM(CAST(i.BELNR_ID AS NVARCHAR(50)))), N'Вне документа'),
+    ISNULL(RTRIM(LTRIM(CAST(i.BELPOS_ID AS NVARCHAR(50)))), N'-'),
+    ISNULL(RTRIM(LTRIM(CAST(i.POS_ID AS NVARCHAR(50)))), N'-'),
+    ISNULL(RTRIM(LTRIM(i.ItemCode)), N'Общий простой станка'),
+    RTRIM(LTRIM(i.PERS_ID_Name)),
+    N'Прерывание' AS [Тип Работы],
+    0, 0, 0, 0, 0,
+    CAST(ROUND(CASE WHEN i.[Продолжительность, мин] > 0 THEN i.[Продолжительность, мин] ELSE 0 END, 0) AS INT),
+    CAST(0 AS FLOAT), CAST(0 AS FLOAT),
+    RTRIM(LTRIM(i.GRUNDINFO_STANDARD)),
+    RTRIM(LTRIM(i.GRUNDINFO_COMMENT))
+FROM (
+    SELECT
+        t10.APLATZ_ID, t0.PERS_ID_Name, t1.BELNR_ID, t1.BELPOS_ID, t1.POS_ID, t2.ItemCode,
+        t6.GRUNDINFO AS GRUNDINFO_STANDARD, t0.GRUNDINFO AS GRUNDINFO_COMMENT,
+        DATEDIFF(mi, t10.DATUM_VON, (CASE WHEN t10.DATUM_BIS <= GETDATE() THEN t10.DATUM_BIS ELSE GETDATE() END)) AS [Продолжительность, мин],
+        CASE WHEN CAST(t10.DATUM_VON AS TIME) >= '07:00:00' AND CAST(t10.DATUM_VON AS TIME) < '19:00:00' THEN 1 ELSE 2 END AS Смена,
+        CASE
+            WHEN CAST(t10.DATUM_VON AS TIME) >= '07:00:00' AND CAST(t10.DATUM_VON AS TIME) < '19:00:00' THEN CAST(t10.DATUM_VON AS DATE)
+            WHEN CAST(t10.DATUM_VON AS TIME) BETWEEN '19:00:00.0000000' AND '23:59:59.0000000' THEN CAST(t10.DATUM_VON AS DATE)
+            ELSE CAST(DATEADD(day, -1, t10.DATUM_VON) AS DATE)
+        END AS Дата
+    FROM GC_APLATZ_STILLSTAND_BY_SHIFT t10
+    LEFT JOIN BEAS_APLATZ_STILLSTAND t0 ON t10.INTNR = t0.INTNR AND t10.APLATZ_ID = t0.APLATZ_ID
+    LEFT JOIN BEAS_STILLSTANDGRUND t6 ON t0.GRUNDID = t6.GRUNDID
+    OUTER APPLY (
+        SELECT TOP 1 b.BELNR_ID, b.BELPOS_ID, b.POS_ID
+        FROM beas_arbzeit b
+        WHERE b.APLATZ_ID = t0.APLATZ_ID AND t0.DATUM_VON >= b.ANFZEIT AND t0.DATUM_VON < b.ENDZEIT
+        ORDER BY b.ANFZEIT DESC
+    ) t1
+    LEFT JOIN BEAS_FTPOS t2 ON t2.BELNR_ID = t1.BELNR_ID AND t2.BELPOS_ID = t1.BELPOS_ID
+    WHERE t10.DATUM_VON >= DATEFROMPARTS(YEAR(GETDATE()), 1, 1)
+      AND t10.DATUM_VON < t10.DATUM_BIS
+      AND t10.APLATZ_ID IN (SELECT APLATZ_ID FROM BEAS_APLATZ WHERE Active = 'J' AND GRUPPE IN ('Lathes', 'Milling') AND (APLATZ_ID NOT IN ('L02', 'L05', 'L08', 'L11', 'M04', 'M08', 'Mill', 'Turning')))
+) i
+WHERE i.Дата >= DATEFROMPARTS(YEAR(GETDATE()), 1, 1);
+GO
+```
+
+---
+
+## 2. ДОБАВЛЕНИЕ №2 — новый раздел «1.4. Ремонт исторических снапшотов плана (Duration)»
+
+> Вставить после раздела 1.3. Применяется **один раз** к версиям, созданным битой процедурой
+> (признак: `Duration = 720` у всех строк версии). Новые снапшоты в ремонте не нуждаются.
+
+**Формула обратного расчета:** `Duration куска = ROUND(Plan_Qty_Details × TEAPLATZ, 0) + наладка_мин_из_статуса`.
+Наладка парсится из текста статуса `Нет (наладка X мин)`; для «наладка завершена» и «Да (…)» = 0.
+
+```sql
+USE [GROSVER_GROUP];
+GO
+UPDATE [dbo].[GC_PLAN_SNAPSHOT]
+SET [Duration] =
+    CAST(ROUND(ISNULL([Plan_Qty_Details], 0) * ISNULL([TEAPLATZ], 0), 0) AS INT)
+    + CASE
+        WHEN [Setup_Done] LIKE N'Нет (наладка % мин)'
+        THEN CAST(SUBSTRING([Setup_Done],
+                   CHARINDEX(N'наладка ', [Setup_Done]) + 8,
+                   CHARINDEX(N' мин', [Setup_Done]) - CHARINDEX(N'наладка ', [Setup_Done]) - 8) AS INT)
+        ELSE 0
+      END
+WHERE [Duration] = 720;   -- признак битой версии; для полного пересчета фильтр убрать
+GO
+
+-- КОНТРОЛЬ 1: в отремонтированной версии не осталось строк с 720
+SELECT COUNT(*) AS [Остаток_720] FROM [dbo].[GC_PLAN_SNAPSHOT]
+WHERE [Version_Num] = 8 AND [Duration] = 720;   -- ожидаем 0
+
+-- КОНТРОЛЬ 2: плановых минут на станок/смену не больше 720
+-- (строки >720 = переаллокация Ганта, это данные, а не ошибка расчета)
+SELECT [Shift], [RESOURCE], SUM([Duration]) AS [SumMin]
+FROM [dbo].[GC_PLAN_SNAPSHOT]
+WHERE [Version_Num] = 8
+GROUP BY [Shift], [RESOURCE]
+HAVING SUM([Duration]) > 720;
+```
+
+---
+
+## 3. ДОБАВЛЕНИЕ №3 — примечание к процедуре `GetPlanReportForExell`
+
+В финальном `SELECT` процедуры **обязаны** присутствовать строки кусков (в текущей версии они есть;
+запрещается заменять их на границы смены — это и породило дефект №1):
+
+```sql
+slice.Part_VON  AS [VON],
+slice.Part_BIS  AS [BIS],
+splits.Part_Duration AS [Duration],
+```
+
+---
+
+## 4. Результаты верификации (период 24–26.08.2026, версия плана 8)
+
+| Показатель «Итого» | ДО исправлений | ПОСЛЕ | Комментарий |
+|---|---|---|---|
+| План (шт) / Факт (шт) | 4 514 / 2 905 | 4 514 / 2 905 | не изменились ✅ |
+| Прерывания (мин) | 37 053 | 37 053 | не изменились ✅ |
+| План (мин) | 79 920 | **36 580** | по дням: 14 043 / 13 454 / 9 083 |
+| Факт (мин) | 21 283 | **33 376** | по дням: 12 630 / 11 133 / 9 613 (ночи восстановлены) |
+
+Точечные проверки: `18:56→03:33 = 517 мин`, `21 шт × 8 + 120 наладки = 288 мин`,
+`22×10 = 220 / 34×10 = 340`, «наладка завершена» → «Обработка» ✅.
+
+---
+
+## 5. Остаточные замечания (свойства ДАННЫХ, не кода — в расчет не вмешиваемся)
+
+1. **332 «мгновенные сдачи»** в факте за год (`Start Time = End Time`, например 17 шт в 00:00–00:00):
+   минуты неизвестны и равны 0, штуки учтены. Вопрос дисциплины отметки времени на производстве.
+2. **Переаллокация Ганта** (план > 720 мин на станок/смену, M05/M11 за 21–23.08):
+   станок не может работать параллельно — вопрос к планировщику; следить контролем 2 из раздела 1.4.
+3. **Тшт в строках «Итого»** выводится как MAX по периоду (косметика); при желании заменить на средневзвешенный.
+4. **% выполнения > 100%** на строках, где факт шел по документам вне версии плана 8 — честная картина, не ошибка.
