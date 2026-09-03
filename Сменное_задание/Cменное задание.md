@@ -6894,3 +6894,121 @@ END
 
 GO
 ```
+
+## SQL-процедура для удаления (на сервере SAP)
+
+```sql
+USE [GROSVER_GROUP]
+GO
+
+IF OBJECT_ID('dbo.SP_DeletePlanSnapshotsByMonth', 'P') IS NOT NULL 
+    DROP PROCEDURE dbo.SP_DeletePlanSnapshotsByMonth;
+GO
+
+SET ANSI_NULLS ON
+GO
+SET QUOTED_IDENTIFIER ON
+GO
+
+CREATE PROCEDURE [dbo].[SP_DeletePlanSnapshotsByMonth]
+    @Year INT,
+    @Month INT
+AS
+BEGIN
+    SET NOCOUNT ON;
+    
+    DECLARE @DeletedRows INT;
+    
+    -- Удаляем все снимки за переданный год и месяц
+    DELETE FROM [dbo].[GC_PLAN_SNAPSHOT] 
+    WHERE YEAR([Report_Month]) = @Year AND MONTH([Report_Month]) = @Month;
+    
+    SET @DeletedRows = @@ROWCOUNT;
+    
+    -- Возвращаем отчет об удалении
+    SELECT 
+        @DeletedRows AS [DeletedCount],
+        N'Успешно удалено строк плана: ' + CAST(@DeletedRows AS NVARCHAR) + 
+        N' (за ' + RIGHT('0' + CAST(@Month AS NVARCHAR), 2) + '.' + CAST(@Year AS NVARCHAR) + N')' AS [Message];
+END
+GO
+```
+
+```js
+function onOpen() {
+  var ui = SpreadsheetApp.getUi();
+  ui.createMenu('🏭 Производство')
+    .addItem('📥 1. Загрузить Аналитику (План/Факт)', 'showAnalyticsDialog')
+    .addItem('📈 2. Детальный Дашборд (По дням)', 'buildDashboard')
+    .addItem('📊 3. Общий Дашборд (Итоги + График)', 'buildAggregatedDashboard')
+    .addSeparator()
+    .addItem('💬 4. Подтянуть комментарии к дашборду', 'fetchAndApplyComments')
+    .addItem('🤖 5. Сгенерировать промпт для ИИ', 'generateAiPrompt')
+    .addSeparator()
+    .addItem('📸 Создать новую версию плана (Snapshot)', 'createNewSnapshot')
+    .addItem('📖 Загрузить историю версий (Логи)', 'fetchVersionLogs')
+    .addItem('🗑 Удалить версии плана (за месяц)', 'deleteSnapshotsPrompt') // НОВАЯ КНОПКА
+    .addToUi();
+}
+
+// ---------------------------------------------------------
+// УДАЛЕНИЕ ВЕРСИЙ ПЛАНА ИЗ БАЗЫ ДАННЫХ
+// ---------------------------------------------------------
+function deleteSnapshotsPrompt() {
+  var ui = SpreadsheetApp.getUi();
+  
+  // 1. Запрашиваем месяц и год
+  var response = ui.prompt(
+    "Удаление снимков плана 🗑",
+    "Введите месяц и год для безвозвратного удаления данных.\nФормат: ММ.ГГГГ (например, 08.2026):",
+    ui.ButtonSet.OK_CANCEL
+  );
+  
+  if (response.getSelectedButton() !== ui.Button.OK) return;
+  
+  var input = response.getResponseText().trim();
+  
+  // 2. Валидация ввода (проверяем, что ввели ровно XX.XXXX)
+  var match = input.match(/^(\d{2})\.(\d{4})$/);
+  if (!match) {
+    ui.alert("❌ Ошибка ввода", "Пожалуйста, используйте строгий формат ММ.ГГГГ (например, 08.2026).", ui.ButtonSet.OK);
+    return;
+  }
+  
+  var month = parseInt(match[1], 10);
+  var year = parseInt(match[2], 10);
+  
+  if (month < 1 || month > 12) {
+    ui.alert("❌ Ошибка", "Месяц должен быть от 01 до 12.", ui.ButtonSet.OK);
+    return;
+  }
+  
+  // 3. Дополнительное подтверждение (защита от случайного удаления)
+  var confirm = ui.alert(
+    "⚠️ ВНИМАНИЕ: Безвозвратное удаление!", 
+    "Вы уверены, что хотите удалить ВСЕ сохраненные версии плана за " + input + "?\n\nЭто действие нельзя отменить.", 
+    ui.ButtonSet.YES_NO
+  );
+  
+  if (confirm !== ui.Button.YES) return;
+  
+  // 4. Отправляем запрос в базу данных
+  var query = "EXEC [dbo].[SP_DeletePlanSnapshotsByMonth] @Year = " + year + ", @Month = " + month;
+  
+  var options = Object.assign({}, API_OPTIONS);
+  options.payload = JSON.stringify({ "query": query });
+
+  try {
+    var res = UrlFetchApp.fetch(API_URL, options);
+    var json = JSON.parse(res.getContentText());
+    
+    if (json.success && json.data && json.data.length > 0) {
+      ui.alert("✅ Готово!", json.data[0].Message + "\n\n(Обновите логи кнопкой 'Загрузить историю версий', чтобы увидеть изменения)", ui.ButtonSet.OK);
+    } else {
+      throw new Error(json.error || json.message || "Неизвестная ошибка сервера");
+    }
+  } catch (e) {
+    ui.alert("❌ Ошибка при удалении: " + e.toString());
+  }
+}
+```
