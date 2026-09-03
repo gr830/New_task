@@ -6693,3 +6693,204 @@ function shiftFormulaColumnsWithInsert(formula, targetRow) {
   });
 }
 ```
+
+## Замена POS_ID на POS_TEXT
+
+```sql
+USE [GROSVER_GROUP]
+GO
+
+/****** Object:  StoredProcedure [dbo].[GetPlanReportForExell]    Script Date: 03.09.2026 15:44:29 ******/
+SET ANSI_NULLS ON
+GO
+
+SET QUOTED_IDENTIFIER ON
+GO
+
+-- Создаем процедуру. Теперь эта команда идет первой в своем блоке благодаря GO выше.
+ALTER PROCEDURE [dbo].[GetPlanReportForExell]
+    @DaysAhead INT = 3 -- Входной параметр: количество дней вперед (по умолчанию 3)
+AS
+BEGIN
+    -- Инструкция SET NOCOUNT ON добавлена для предотвращения отправки 
+    -- лишних сообщений о количестве строк, чтобы не мешать Node.js серверу.
+    SET NOCOUNT ON;
+
+    -- НАЧАЛО ВАШЕГО ЗАПРОСА
+    WITH PlanBase AS (
+        SELECT 
+            p.*,
+            tp.ItemName,
+            CAST(p.BELNR_ID AS INT) as int_BELNR_ID,
+            CAST(p.BELPOS_ID AS INT) as int_BELPOS_ID,
+            CAST(p.POS_ID AS INT) as int_POS_ID,
+            ISNULL(p.TRAPLATZ, 0) AS safe_TRAPLATZ,
+            ba.BEZ AS [Описание станка],
+            -- Считаем сумму времени по ВСЕМ предыдущим строкам этой же операции
+            ISNULL(SUM(p.Duration) OVER (
+                PARTITION BY p.BELNR_ID, p.BELPOS_ID, p.POS_ID 
+                ORDER BY p.VON 
+                ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING
+            ), 0) AS Prev_Rows_Duration
+        FROM [GROSVER_GROUP].[dbo].[GC_PLAN_FINANCIAL_REPORT] p
+        LEFT JOIN [dbo].[BEAS_FTPOS] tp ON CAST(p.BELNR_ID AS INT) = tp.BELNR_ID 
+                                        AND CAST(p.BELPOS_ID AS INT) = tp.BELPOS_ID
+        LEFT JOIN [dbo].[BEAS_FTAPL] tl ON CAST(p.BELNR_ID AS INT) = tl.BELNR_ID 
+                                        AND CAST(p.BELPOS_ID AS INT) = tl.BELPOS_ID and p.POS_ID = tl.POS_ID
+        LEFT JOIN [dbo].[BEAS_APLATZ] ba ON p.[RESOURCE] = ba.APLATZ_ID
+        -- Фильтр: от сегодняшнего дня до сегодняшнего дня + @DaysAhead дней
+        WHERE CAST(p.VON AS DATE) >= CAST(GETDATE() AS DATE) 
+          AND CAST(p.VON AS DATE) <= CAST(DATEADD(DAY, @DaysAhead, GETDATE()) AS DATE) 
+          AND tl.ABGKZ <> 'J'
+    ),
+
+    LocalStatus AS (
+        SELECT 
+            CAST(BELNR_ID AS INT) as BELNR_ID, 
+            CAST(BELPOS_ID AS INT) as BELPOS_ID, 
+            CAST(POS_ID AS INT) as POS_ID,
+            MAX(CASE WHEN TYP = 'A' THEN 1 ELSE 0 END) AS HasProcessing,
+            MAX(CASE WHEN TYP = 'R' AND ZEIT > 0 THEN 1 ELSE 0 END) AS HasSetup,
+            SUM(ISNULL(MENGE_GUT, 0)) AS SumMengeGut
+        FROM [dbo].[BEAS_ARBZEIT]
+        GROUP BY BELNR_ID, BELPOS_ID, POS_ID
+    ),
+
+    GlobalSetupLookup AS (
+        SELECT 
+            tp.ItemName,
+            az.POS_ID,
+            az.APLATZ_ID, 
+            1 AS HasGlobalSetup
+        FROM [dbo].[BEAS_ARBZEIT] az
+        INNER JOIN [dbo].[BEAS_FTPOS] tp ON az.BELNR_ID = tp.BELNR_ID AND az.BELPOS_ID = tp.BELPOS_ID
+        INNER JOIN [dbo].[BEAS_FTHAUPT] fh ON tp.BELNR_ID = fh.BELNR_ID
+        WHERE tp.ABGKZ = 'N' AND fh.ABGKZ = 'N' 
+          AND az.TYP = 'R' AND az.ZEIT > 0 
+        GROUP BY tp.ItemName, az.POS_ID, az.APLATZ_ID
+    ),
+
+    ExtendedPlan AS (
+        SELECT 
+            p.*,
+            CASE WHEN ls.HasProcessing = 1 OR ls.HasSetup = 1 OR gs.HasGlobalSetup = 1 THEN 0 ELSE 1 END AS Is_Setup_Needed,
+            CASE WHEN ls.HasProcessing = 1 THEN N'Да (Идет обработка)'
+                 WHEN ls.HasSetup = 1 THEN N'Да (Наладка по позиции)'
+                 WHEN gs.HasGlobalSetup = 1 THEN N'Да (Наладка в др. документе)'
+                 ELSE N'Нет' END AS Setup_Done_Text,
+            ISNULL(ls.SumMengeGut, 0) AS SumMengeGut,
+            apl.TEAPLATZ AS apl_TEAPLATZ,
+            apl.gc_intensity_fact,
+            apl.POS_TEXT -- <--- ШАГ 1: Извлекаем новое поле из таблицы BEAS_FTAPL
+        FROM PlanBase p
+        LEFT JOIN [dbo].[BEAS_FTAPL] apl ON p.int_BELNR_ID = apl.BELNR_ID AND p.int_BELPOS_ID = apl.BELPOS_ID AND p.int_POS_ID = apl.POS_ID
+        LEFT JOIN LocalStatus ls ON p.int_BELNR_ID = ls.BELNR_ID AND p.int_BELPOS_ID = ls.BELPOS_ID AND p.int_POS_ID = ls.POS_ID
+        LEFT JOIN GlobalSetupLookup gs ON p.ItemName = gs.ItemName AND p.int_POS_ID = gs.POS_ID AND p.[RESOURCE] = gs.APLATZ_ID
+    )
+
+    SELECT 
+        ep.PRIOR_ID,
+        ep.ItemCode,
+        ep.ItemName,
+        ep.BELNR_ID,
+        ep.BELPOS_ID,
+        
+        -- ШАГ 2: Подменяем вывод. Берем POS_TEXT, но отправляем его под названием "POS_ID"
+        ISNULL(ep.POS_TEXT, ep.POS_ID) AS POS_ID, 
+        
+        ep.[RESOURCE],
+        ep.[Описание станка],
+        
+        CASE WHEN DATEPART(HOUR, sh.ShiftStart) = 7 THEN N'1 смена ' ELSE N'2 смена ' END + 
+        CONVERT(VARCHAR(10), CAST(sh.ShiftStart AS DATE), 104) AS [Shift],
+        
+        -- УМНАЯ НАЛАДКА: опирается на сквозной расчет по всем строкам одной операции
+        CASE 
+            WHEN ep.Is_Setup_Needed = 0 THEN ep.Setup_Done_Text
+            WHEN setup.Setup_In_Slice > 0 THEN N'Нет (наладка ' + CAST(setup.Setup_In_Slice AS NVARCHAR) + N' мин)'
+            ELSE N'Нет (наладка завершена)'
+        END AS [Setup_Done],
+
+        ep.VERURSACHER_AGBEZ,
+        
+        slice.Part_VON AS [VON],
+        slice.Part_BIS AS [BIS],
+        splits.Part_Duration AS [Duration],
+        ep.MENGE,
+
+        CAST(
+            (splits.Part_Duration - setup.Setup_In_Slice) / NULLIF(ep.apl_TEAPLATZ, 0)
+        AS DECIMAL(18,2)) AS Plan_Qty_Details,
+
+        ep.TEAPLATZ,
+        ep.TRAPLATZ,
+        ep.gc_intensity_fact,
+        ep.apl_TEAPLATZ AS TEAPLATZ_ALT,
+        
+        (ep.MENGE - ep.SumMengeGut) AS Remainder_Order,
+        ep.Price_for_1_min_V2 as Price_for_1_min,
+        
+        CAST(
+            ep.Narabotka_plan * (CAST(splits.Part_Duration AS FLOAT) / NULLIF(ep.Duration, 0))
+        AS DECIMAL(18,2)) AS Narabotka_plan,
+        
+        ep.Date
+
+    FROM ExtendedPlan ep
+
+    -- 1. Смещение на 7 часов для генератора смен
+    CROSS APPLY (
+        SELECT DATEADD(HOUR, -7, ep.VON) AS OffsetVON
+    ) o
+    CROSS APPLY (
+        SELECT DATEADD(HOUR, CASE WHEN DATEPART(HOUR, o.OffsetVON) < 12 THEN 7 ELSE 19 END, CAST(CAST(o.OffsetVON AS DATE) AS DATETIME)) AS FirstShiftStart
+    ) fs
+
+    -- 2. Генерируем только нужные смены
+    INNER JOIN (VALUES (0),(1),(2),(3),(4),(5),(6),(7),(8),(9),(10),(11),(12),(13),(14),(15),(16),(17),(18),(19),(20)) nums(n)
+        ON DATEADD(HOUR, nums.n * 12, fs.FirstShiftStart) < ep.BIS
+
+    -- 3. Вычисляем границы смены
+    CROSS APPLY (
+        SELECT 
+            DATEADD(HOUR, nums.n * 12, fs.FirstShiftStart) AS ShiftStart,
+            DATEADD(HOUR, (nums.n + 1) * 12, fs.FirstShiftStart) AS ShiftEnd
+    ) sh
+
+    -- 4. Режем операцию по сменам
+    CROSS APPLY (
+        SELECT 
+            CASE WHEN ep.VON > sh.ShiftStart THEN ep.VON ELSE sh.ShiftStart END AS Part_VON,
+            CASE WHEN ep.BIS < sh.ShiftEnd THEN ep.BIS ELSE sh.ShiftEnd END AS Part_BIS
+    ) slice
+
+    -- 5. Считаем длительность и локальное время ДО текущего куска
+    CROSS APPLY (
+        SELECT 
+            DATEDIFF(MINUTE, slice.Part_VON, slice.Part_BIS) AS Part_Duration,
+            DATEDIFF(MINUTE, ep.VON, slice.Part_VON) AS Time_Before_In_Row
+    ) splits
+
+    -- 6. КРИТИЧНОЕ ИСПРАВЛЕНИЕ: Суммируем время из прошлых строк плана + время в текущей строке плана
+    CROSS APPLY (
+        SELECT ep.Prev_Rows_Duration + splits.Time_Before_In_Row AS Total_Time_Before
+    ) t_before
+
+    -- 7. Расчет наладки на основе ГЛОБАЛЬНОГО времени (Total_Time_Before)
+    CROSS APPLY (
+        SELECT 
+            CASE 
+                WHEN ep.Is_Setup_Needed = 0 THEN 0
+                WHEN (ep.safe_TRAPLATZ - t_before.Total_Time_Before) <= 0 THEN 0 -- Вся наладка уже пройдена в прошлых сменах или прошлых строках!
+                WHEN (ep.safe_TRAPLATZ - t_before.Total_Time_Before) > splits.Part_Duration THEN splits.Part_Duration -- Вся текущая смена уходит на наладку
+                ELSE (ep.safe_TRAPLATZ - t_before.Total_Time_Before) -- Остаток наладки перекрывается в этой смене
+            END AS Setup_In_Slice
+    ) setup
+
+    WHERE splits.Part_Duration > 0 
+
+    ORDER BY sh.ShiftStart, ep.VON, ep.PRIOR_ID;
+END
+
+GO
+```
