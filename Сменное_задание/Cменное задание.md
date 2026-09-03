@@ -5792,21 +5792,19 @@ splits.Part_Duration AS [Duration],
 ## Обновление ручной выгрузки сменнего задания
 
 ```js
-/**
- * Функция создания верхнего меню
- */
 function onOpen() {
   var ui = SpreadsheetApp.getUi();
   ui.createMenu('⚙️ ЗАПУСК')
       .addItem('Получить данные из SAP', 'importPlanReport')
       .addSeparator()
       .addItem('Сформировать сменное задание', 'createShiftAssignment')
+      .addItem('📊 Сформировать вкладку "Общая"', 'createAggregatedShiftSheet') // <--- ДОБАВЛЕНА КНОПКА
       .addSeparator()
       .addItem('Сформировать чек-лист', 'showDateDialog')
       .addSeparator()
       .addItem('Отправить в "Чек-лист_План"', 'showExportDialog')
       .addSeparator()
-      .addItem('🚀 Отправить ручной план в БД', 'exportManualPlanToDB') // КНОПКА ЭКСПОРТА
+      .addItem('🚀 Отправить ручной план в БД', 'exportManualPlanToDB')
       .addSeparator()
       .addItem('🗑️ Очистить сменные листы', 'clearAllShiftSheets')
       .addToUi();
@@ -6387,5 +6385,311 @@ function formatDateValue(val) {
     return s.substring(0, 10);
   }
   return s;
+}
+
+
+/**
+ * Функция формирования сводного листа "Общая" (агрегация по станкам с добавлением "Комментариев" и фиксом дат)
+ */
+function createAggregatedShiftSheet() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var targetSheetName = "Общая";
+
+  var sheets = ss.getSheets();
+  var shiftRegex = /^(\d)\s*смена\s*(\d{2})\.(\d{2})\.(\d{4})/i;
+
+  var tasks = [];
+  var firstSheetInfo = null;
+
+  // 1. СОБИРАЕМ ДАННЫЕ СО ВСЕХ СМЕН
+  for (var i = 0; i < sheets.length; i++) {
+    var s = sheets[i];
+    var name = s.getName();
+    var match = name.match(shiftRegex);
+    
+    if (match) {
+      var shiftName = match[1] + " смена " + match[2] + "." + match[3] + "." + match[4];
+      var sortKey = match[4] + match[3] + match[2] + "_" + match[1]; // Для правильной сортировки дат
+
+      var vals = s.getDataRange().getValues();
+      var frms = s.getDataRange().getFormulas();
+
+      if (!firstSheetInfo && vals.length >= 3) {
+        firstSheetInfo = {
+          row2: vals[1], 
+          row3: vals[2], 
+          sheet: s,
+          maxCol: s.getLastColumn()
+        };
+      }
+
+      var currentGroup = "";
+      var currentMachine = "";
+
+      for (var r = 3; r < vals.length; r++) {
+        var col0 = String(vals[r][0]).trim();
+        var col3 = String(vals[r][3]).trim();
+
+        if (col0.indexOf("Выдал") === 0 || col0.indexOf("Смену сдал") === 0) break;
+
+        if (col0 === "Фрезерная группа" || col0 === "Токарная группа") {
+          currentGroup = col0;
+          continue;
+        }
+        if (col0 !== "" && col3 === "") {
+          currentMachine = col0;
+          continue;
+        }
+        
+        if (col3 !== "" && currentMachine !== "") {
+          tasks.push({
+            shiftName: shiftName,
+            sortKey: sortKey,
+            group: currentGroup,
+            machine: currentMachine,
+            values: vals[r],
+            formulas: (frms && frms[r]) ? frms[r] : []
+          });
+        }
+      }
+    }
+  }
+
+  if (tasks.length === 0) {
+    SpreadsheetApp.getUi().alert("Не найдено сменных заданий для агрегации.");
+    return;
+  }
+  if (!firstSheetInfo) return;
+
+  // 2. ГОТОВИМ НОВЫЙ ЛИСТ "Общая"
+  var targetSheet = ss.getSheetByName(targetSheetName);
+  if (targetSheet) {
+    ss.deleteSheet(targetSheet);
+  }
+  targetSheet = ss.insertSheet(targetSheetName, 1);
+
+  var sourceColsCount = firstSheetInfo.maxCol;
+  if (sourceColsCount < 31) sourceColsCount = 31;
+  
+  // Увеличиваем на 2: +1 колонка "Смена и Дата", +1 колонка "Комментарии"
+  var targetColsCount = sourceColsCount + 2; 
+
+  var output = [];
+
+  var titleRow = new Array(targetColsCount).fill("");
+  titleRow[0] = "СВОДНОЕ СМЕННОЕ ЗАДАНИЕ ПО СТАНКАМ";
+  output.push(titleRow);
+
+  var r2 = [""];
+  var r3 = ["Смена и Дата"];
+  
+  // Формируем новую шапку с учетом вставки
+  for (var c = 0; c < sourceColsCount; c++) {
+    r2.push(firstSheetInfo.row2[c] !== undefined ? firstSheetInfo.row2[c] : "");
+    
+    // ФИКС 1899 ГОДА: Начиная с 19-го индекса (после "Подпись") идут часы (9:00). 
+    // Нам они в сводном листе не нужны, так как тут смешаны 1 и 2 смены. Оставляем пустоту.
+    if (c > 18) {
+      r3.push("");
+    } else {
+      r3.push(firstSheetInfo.row3[c] !== undefined ? firstSheetInfo.row3[c] : "");
+    }
+    
+    // Если это колонка 14 (индекс 14 = "Факт, мин"), сразу после нее вставляем Комментарии
+    if (c === 14) { 
+      r2.push("");
+      r3.push("Комментарии");
+    }
+  }
+  while(r2.length < targetColsCount) r2.push("");
+  while(r3.length < targetColsCount) r3.push("");
+  output.push(r2);
+  output.push(r3);
+
+  // 3. ГРУППИРОВКА И ВЫВОД ДАННЫХ
+  var uniqueGroups = [];
+  tasks.forEach(function(t) {
+    if (uniqueGroups.indexOf(t.group) === -1) uniqueGroups.push(t.group);
+  });
+  
+  uniqueGroups.sort(function(a, b) {
+    if (a.indexOf("Фрезер") !== -1) return -1;
+    if (b.indexOf("Фрезер") !== -1) return 1;
+    return a.localeCompare(b);
+  });
+
+  var groupRowsIndexes = [];
+  var machineRowsIndexes = [];
+  var taskRowsIndexes = [];
+  var currentRowNum = 4; 
+
+  uniqueGroups.forEach(function(group) {
+    var groupRow = new Array(targetColsCount).fill("");
+    groupRow[0] = group;
+    output.push(groupRow);
+    groupRowsIndexes.push(currentRowNum);
+    currentRowNum++;
+
+    var gTasks = tasks.filter(function(t) { return t.group === group; });
+    var machines = [];
+    gTasks.forEach(function(t) {
+      if (machines.indexOf(t.machine) === -1) machines.push(t.machine);
+    });
+    machines.sort(); 
+
+    machines.forEach(function(machine) {
+      var machineRow = new Array(targetColsCount).fill("");
+      machineRow[1] = machine; 
+      output.push(machineRow);
+      machineRowsIndexes.push(currentRowNum);
+      currentRowNum++;
+
+      var mTasks = gTasks.filter(function(t) { return t.machine === machine; });
+      mTasks.sort(function(a, b) { return a.sortKey.localeCompare(b.sortKey); });
+
+      mTasks.forEach(function(t) {
+        var tRow = [t.shiftName];
+        
+        for (var c = 0; c < sourceColsCount; c++) {
+          var val = t.values[c];
+          var frm = (t.formulas && t.formulas.length > c) ? t.formulas[c] : "";
+
+          if (frm && frm.toString().startsWith("=")) {
+            tRow.push(shiftFormulaColumnsWithInsert(frm, currentRowNum));
+          } else {
+            tRow.push(val === undefined ? "" : val);
+          }
+          
+          if (c === 14) {
+            tRow.push(""); // Пустая ячейка для столбца "Комментарии"
+          }
+        }
+        
+        while(tRow.length < targetColsCount) tRow.push("");
+        output.push(tRow);
+        taskRowsIndexes.push(currentRowNum);
+        currentRowNum++;
+      });
+    });
+  });
+
+  var dataRowsCount = output.length;
+  var range = targetSheet.getRange(1, 1, dataRowsCount, targetColsCount);
+  range.setValues(output);
+
+  // 4. ДИЗАЙН И ФОРМАТИРОВАНИЕ
+  var COLOR_MACHINE_BG = "#dae3f3";
+  var COLOR_GROUP_BG   = "#bdd7ee";
+  var COLOR_HEADER_BG  = "#f3f3f3";
+  var COLOR_FIO_BG     = "#fce4d6";
+  var COLOR_PLAN_BG    = "#c6e0b4";
+
+  range.setHorizontalAlignment("center").setVerticalAlignment("middle");
+  targetSheet.getRange(1, 1, dataRowsCount, 3).setHorizontalAlignment("left"); 
+
+  targetSheet.getRange(1, 1, 1, targetColsCount).mergeAcross().setFontWeight("bold").setFontSize(12).setHorizontalAlignment("center");
+  targetSheet.getRange(2, 1, 2, targetColsCount).setFontWeight("bold").setBackground(COLOR_HEADER_BG).setWrap(true);
+  targetSheet.getRange(2, 1, dataRowsCount - 1, targetColsCount).setBorder(true, true, true, true, true, true);
+  
+  // Временная шкала теперь начинается с колонки 22 (V)
+  targetSheet.getRange(2, 22, 1, 12).setBackground("#fff2cc"); 
+  // ФИКС 1899 ГОДА: принудительно задаем текстовый формат в ячейках, где раньше было время 
+  targetSheet.getRange(3, 22, 1, 12).setNumberFormat("@");
+
+  // Копируем ширину колонок со сдвигом
+  targetSheet.setColumnWidth(1, 140); // Смена и Дата
+  targetSheet.setColumnWidth(2, 160); // ФИО Наладчика
+  targetSheet.setColumnWidth(3, 130); // ФИО Оператора
+  
+  for (var c = 3; c <= sourceColsCount; c++) {
+    var w = firstSheetInfo.sheet.getColumnWidth(c);
+    if (w) {
+      if (c <= 15) { 
+        targetSheet.setColumnWidth(c + 1, w); // До "Комментариев"
+      } else {
+        targetSheet.setColumnWidth(c + 2, w); // После "Комментариев"
+      }
+    }
+  }
+  targetSheet.setColumnWidth(17, 200); // Задаем ширину для нового столбца "Комментарии" (колонка Q)
+
+  groupRowsIndexes.forEach(function(r) {
+    targetSheet.getRange(r, 1, 1, targetColsCount).setFontWeight("bold").setBackground(COLOR_GROUP_BG);
+    targetSheet.getRange(r, 1, 1, 20).mergeAcross();
+  });
+
+  machineRowsIndexes.forEach(function(r) {
+    targetSheet.getRange(r, 1, 1, targetColsCount).setFontWeight("bold").setBackground(COLOR_MACHINE_BG);
+    targetSheet.getRange(r, 2, 1, 19).mergeAcross();
+  });
+
+  var checkSheet = ss.getSheetByName("Чек_Лист");
+  var nameRule = null;
+  if (checkSheet) {
+    nameRule = SpreadsheetApp.newDataValidation()
+      .requireValueInRange(checkSheet.getRange("B2:B"), true)
+      .setAllowInvalid(true).build();
+  }
+
+  if (taskRowsIndexes.length > 0) {
+    taskRowsIndexes.forEach(function(r) {
+      targetSheet.getRange(r, 2, 1, 2).setBackground(COLOR_FIO_BG);
+      if (nameRule) targetSheet.getRange(r, 2, 1, 2).setDataValidation(nameRule);
+      targetSheet.getRange(r, 13, 1, 1).setBackground(COLOR_PLAN_BG);
+    });
+
+    // Форматы чисел с учетом сдвига
+    targetSheet.getRange(4, 10, dataRowsCount - 3, 3).setNumberFormat("0.00"); // Тшт, Тнал, интенсивность
+    targetSheet.getRange(4, 13, dataRowsCount - 3, 2).setNumberFormat("0.00"); // План шт, План мин
+    targetSheet.getRange(4, 18, dataRowsCount - 3, 2).setNumberFormat("0.00"); // Стоимость, Наработка план
+    targetSheet.getRange(4, 22, dataRowsCount - 3, 12).setNumberFormat("0");   // Время
+  }
+
+  // 5. ПОДВАЛ
+  var footerStartRow = dataRowsCount + 2;
+  if (checkSheet) {
+    var templateRange = checkSheet.getRange("C1:R7");
+    var targetFooterRange = targetSheet.getRange(footerStartRow, 1);
+    templateRange.copyTo(targetFooterRange);
+  }
+
+  ss.setActiveSheet(targetSheet);
+  targetSheet.setActiveSelection("A1");
+  SpreadsheetApp.getUi().alert("✅ Вкладка 'Общая' успешно агрегирована!");
+}
+
+/**
+ * УМНЫЙ ПАРСЕР ФОРМУЛ С УЧЕТОМ ВСТАВКИ КОЛОНКИ "Комментарии"
+ */
+function shiftFormulaColumnsWithInsert(formula, targetRow) {
+  if (!formula || !formula.toString().startsWith("=")) return formula;
+  
+  return formula.replace(/(\$?)([A-Za-z]+)(\$?)([0-9]+)/g, function(match, pCol, colStr, pRow, rowStr) {
+    var knownFuncs = ["IFERROR", "ROUNDDOWN", "IF", "AND", "OR", "SUM", "N", "VLOOKUP"];
+    if (knownFuncs.indexOf(colStr.toUpperCase()) !== -1) return match;
+    
+    var num = 0;
+    var colUpper = colStr.toUpperCase();
+    for (var i = 0; i < colUpper.length; i++) {
+      num = num * 26 + (colUpper.charCodeAt(i) - 64);
+    }
+    
+    // Если оригинальная колонка до 'O' (15) включительно -> смещение +1
+    // Если 'P' (16) и дальше -> смещение +2
+    var shiftAmount = (num <= 15) ? 1 : 2;
+    num += shiftAmount;
+    
+    var newCol = "";
+    var tempNum = num;
+    while (tempNum > 0) {
+      var rem = (tempNum - 1) % 26;
+      newCol = String.fromCharCode(65 + rem) + newCol;
+      tempNum = Math.floor((tempNum - 1) / 26);
+    }
+    
+    var newRow = (pRow === "$") ? rowStr : targetRow;
+    
+    return pCol + newCol + pRow + newRow;
+  });
 }
 ```
