@@ -5528,12 +5528,12 @@ function fetchVersionLogs() {
 }
 ```
 
-# 📌 ОБНОВЛЕНИЕ ОТ 02.09.2026 — АУДИТ КОРРЕКТНОСТИ И ИСПРАВЛЕНИЯ
+## 📌 ОБНОВЛЕНИЕ ОТ 02.09.2026 — АУДИТ КОРРЕКТНОСТИ И ИСПРАВЛЕНИЯ
 
 Проведен сквозной аудит цепочки «Гант → снапшот → представление → выгрузка → дашборды».
 Обнаружены и устранены **три дефекта расчета**. Ниже — что именно заменено и чем.
 
-## 0. Сводная таблица изменений
+### 0. Сводная таблица изменений
 
 | № | Дефект (было) | Последствие | Исправление | Где в документации менять |
 |---|---|---|---|---|
@@ -5547,9 +5547,9 @@ API-сервер, база `ChecklistBot`.
 
 ---
 
-## 1. ЗАМЕНА №1 — раздел «1.2. Создание консолидирующего аналитического представления»
+### 1. ЗАМЕНА №1 — раздел «1.2. Создание консолидирующего аналитического представления»
 
-### 1.1. Что заменяется (старые фрагменты, которые были в разделе 1.2)
+#### 1.1. Что заменяется (старые фрагменты, которые были в разделе 1.2)
 
 **Было (срез ПЛАН, классификатор типа работы):**
 ```sql
@@ -5589,7 +5589,7 @@ CASE WHEN f.Kol_detalej > 0 THEN CAST(ROUND(f.Kol_detalej, 0) AS INT)
      ELSE 0 END AS [Факт_Шт],
 ```
 
-### 1.2. Новый полный код представления (заменяет ВЕСЬ старый код-блок раздела 1.2)
+#### 1.2. Новый полный код представления (заменяет ВЕСЬ старый код-блок раздела 1.2)
 
 ```sql
 USE [GROSVER_GROUP]
@@ -5714,7 +5714,7 @@ GO
 
 ---
 
-## 2. ДОБАВЛЕНИЕ №2 — новый раздел «1.4. Ремонт исторических снапшотов плана (Duration)»
+### 2. ДОБАВЛЕНИЕ №2 — новый раздел «1.4. Ремонт исторических снапшотов плана (Duration)»
 
 > Вставить после раздела 1.3. Применяется **один раз** к версиям, созданным битой процедурой
 > (признак: `Duration = 720` у всех строк версии). Новые снапшоты в ремонте не нуждаются.
@@ -5753,7 +5753,7 @@ HAVING SUM([Duration]) > 720;
 
 ---
 
-## 3. ДОБАВЛЕНИЕ №3 — примечание к процедуре `GetPlanReportForExell`
+### 3. ДОБАВЛЕНИЕ №3 — примечание к процедуре `GetPlanReportForExell`
 
 В финальном `SELECT` процедуры **обязаны** присутствовать строки кусков (в текущей версии они есть;
 запрещается заменять их на границы смены — это и породило дефект №1):
@@ -5766,7 +5766,7 @@ splits.Part_Duration AS [Duration],
 
 ---
 
-## 4. Результаты верификации (период 24–26.08.2026, версия плана 8)
+### 4. Результаты верификации (период 24–26.08.2026, версия плана 8)
 
 | Показатель «Итого» | ДО исправлений | ПОСЛЕ | Комментарий |
 |---|---|---|---|
@@ -5780,7 +5780,7 @@ splits.Part_Duration AS [Duration],
 
 ---
 
-## 5. Остаточные замечания (свойства ДАННЫХ, не кода — в расчет не вмешиваемся)
+### 5. Остаточные замечания (свойства ДАННЫХ, не кода — в расчет не вмешиваемся)
 
 1. **332 «мгновенные сдачи»** в факте за год (`Start Time = End Time`, например 17 шт в 00:00–00:00):
    минуты неизвестны и равны 0, штуки учтены. Вопрос дисциплины отметки времени на производстве.
@@ -5788,3 +5788,604 @@ splits.Part_Duration AS [Duration],
    станок не может работать параллельно — вопрос к планировщику; следить контролем 2 из раздела 1.4.
 3. **Тшт в строках «Итого»** выводится как MAX по периоду (косметика); при желании заменить на средневзвешенный.
 4. **% выполнения > 100%** на строках, где факт шел по документам вне версии плана 8 — честная картина, не ошибка.
+
+## Обновление ручной выгрузки сменнего задания
+
+```js
+/**
+ * Функция создания верхнего меню
+ */
+function onOpen() {
+  var ui = SpreadsheetApp.getUi();
+  ui.createMenu('⚙️ ЗАПУСК')
+      .addItem('Получить данные из SAP', 'importPlanReport')
+      .addSeparator()
+      .addItem('Сформировать сменное задание', 'createShiftAssignment')
+      .addSeparator()
+      .addItem('Сформировать чек-лист', 'showDateDialog')
+      .addSeparator()
+      .addItem('Отправить в "Чек-лист_План"', 'showExportDialog')
+      .addSeparator()
+      .addItem('🚀 Отправить ручной план в БД', 'exportManualPlanToDB') // КНОПКА ЭКСПОРТА
+      .addSeparator()
+      .addItem('🗑️ Очистить сменные листы', 'clearAllShiftSheets')
+      .addToUi();
+}
+
+
+/**
+ * Основная функция генерации сменных заданий
+ */
+function createShiftAssignment() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  
+  // 1. Получаем "Чек_Лист"
+  var checkSheet = ss.getSheetByName("Чек_Лист");
+  if (!checkSheet) {
+    SpreadsheetApp.getUi().alert("Ошибка: Не найден лист 'Чек_Лист'!");
+    return;
+  }
+  
+  // Убираем случайные пробелы
+  var checkData = checkSheet.getDataRange().getValues();
+  var checkUpdated = false;
+  for (var r = 1; r < checkData.length; r++) {
+    if (typeof checkData[r][0] === 'string' && checkData[r][0].match(/^\s+/)) {
+      checkData[r][0] = checkData[r][0].trim();
+      checkUpdated = true;
+    }
+    if (typeof checkData[r][1] === 'string' && checkData[r][1].match(/^\s+/)) {
+      checkData[r][1] = checkData[r][1].trim();
+      checkUpdated = true;
+    }
+  }
+  if (checkUpdated) {
+    checkSheet.getDataRange().setValues(checkData);
+  }
+  
+  // Правила валидации
+  var nameRule = SpreadsheetApp.newDataValidation()
+    .requireValueInRange(checkSheet.getRange("B2:B"), true)
+    .setAllowInvalid(true).build();
+    
+  var masterRule = SpreadsheetApp.newDataValidation()
+    .requireValueInRange(checkSheet.getRange("A2:A"), true)
+    .setAllowInvalid(true).build();
+
+  // 2. Получаем Исходники
+  var sourceSheet = ss.getSheetByName("Исходники");
+  if (!sourceSheet) {
+    SpreadsheetApp.getUi().alert("Ошибка: Не найден лист 'Исходники'!");
+    return;
+  }
+  
+  sourceSheet.getRange("I:J").setNumberFormat("dd.mm.yyyy hh:mm:ss");
+  sourceSheet.autoResizeColumns(9, 2); 
+
+  var data = sourceSheet.getDataRange().getValues();
+  if (data.length < 2) return;
+  
+  var headers = data[0];
+  function getCol(name) {
+    var index = headers.indexOf(name);
+    if (index === -1) throw new Error("Не нашел колонку: " + name);
+    return index;
+  }
+  
+  try {
+    var colPrior = getCol("PRIOR_ID");
+    var colItemCode = getCol("Карточка");
+    var colOrder = getCol("№ док.");
+    var colBelPos = getCol("№ поз.");
+    var colPos = getCol("№ оп.");
+    var colMachine = getCol("Станок");
+    var colMachineDesc = getCol("Описание станка");
+    var colShift = getCol("Смена"); 
+    var colRemain = getCol("Остаток");
+    var colPlanQty = getCol("Кол. план");
+    var colTSh = getCol("Т шт.");
+    var colTNal = getCol("Т нал.");
+    var colIntens = getCol("Интенсивность");
+    var colPrice = getCol("Стоимость минуты");
+    var colStart = getCol("Начало"); 
+    var colSetupDone = getCol("Прошла наладка"); 
+  } catch (e) {
+    SpreadsheetApp.getUi().alert(e.message + "\nПроверьте шапку листа Исходники!");
+    return;
+  }
+
+  // 3. ДИНАМИЧЕСКАЯ ГРУППИРОВКА
+  var shiftsData = {};
+  
+  for (var i = 1; i < data.length; i++) {
+    var row = data[i];
+    var machineCode = String(row[colMachine]).trim(); 
+    var machineDesc = String(row[colMachineDesc]).trim(); 
+    var shiftNameFull = String(row[colShift]).trim(); 
+    if (!machineCode || !shiftNameFull) continue;
+    
+    var machineName = machineCode;
+    if (machineDesc !== "" && machineDesc.toUpperCase() !== "NULL") {
+      machineName += " (" + machineDesc + ")";
+    }
+
+    if (!shiftsData[shiftNameFull]) {
+      shiftsData[shiftNameFull] = { milling: {}, turning: {} };
+    }
+    
+    var targetGroup = (machineCode.toUpperCase().indexOf("L") === 0) ? "turning" : "milling";
+    if (!shiftsData[shiftNameFull][targetGroup][machineName]) {
+      shiftsData[shiftNameFull][targetGroup][machineName] = [];
+    }
+    shiftsData[shiftNameFull][targetGroup][machineName].push(row);
+  }
+  
+  var COLOR_MACHINE_BG = "#dae3f3"; 
+  var COLOR_GROUP_BG   = "#bdd7ee"; 
+  var COLOR_FIO_BG     = "#fce4d6";     
+  var COLOR_PLAN_BG    = "#c6e0b4";    
+  var COLOR_HEADER_BG  = "#f3f3f3";  
+  
+  // 4. Функция построения ЕДИНОЙ таблицы
+  function buildSingleTableSheet(sheetName, shiftLabelFull, shiftObj) {
+    var targetSheet = ss.getSheetByName(sheetName);
+    if (!targetSheet) {
+      targetSheet = ss.insertSheet(sheetName);
+    } else {
+      targetSheet.clear();
+      targetSheet.getDataRange().clearDataValidations();
+    }
+    
+    var output = [];
+    
+    var formattingInfo = {
+      groupRows: [],
+      machineRows: [],
+      taskRows: []
+    };
+    
+    var extractedShift = shiftLabelFull;
+    var extractedDate = "";
+    var splitIndex = shiftLabelFull.indexOf("смена");
+    if (splitIndex !== -1) {
+      extractedShift = shiftLabelFull.substring(0, splitIndex).trim();
+      extractedDate = shiftLabelFull.substring(splitIndex + 5).trim();
+    }
+
+    // МАССИВ НА 31 КОЛОНКУ
+    function makeRow(arr) {
+      var row = new Array(31).fill("");
+      for (var k = 0; k < arr.length; k++) {
+        if (arr[k] !== undefined) row[k] = arr[k];
+      }
+      return row;
+    }
+
+    output.push(makeRow(["", "", "Дата", "'" + extractedDate, "Смена", extractedShift])); // 1
+    
+    output.push(makeRow([
+      "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", 
+      120, "", 240, "", 360, "", 480, "", 600, "", 720, ""
+    ])); // 2
+    
+    var timeLabels = [];
+    if (extractedShift === "1") {
+      timeLabels = ["9:00", "11:00", "13:00", "15:00", "17:00", "19:00"];
+    } else if (extractedShift === "2") {
+      timeLabels = ["21:00", "23:00", "1:00", "3:00", "5:00", "7:00"];
+    } else {
+      timeLabels = ["", "", "", "", "", ""];
+    }
+
+    // Здесь ИСПРАВЛЕНО НА "№ док." вместо "№ заказа"
+    output.push(makeRow([
+      "Ф.И.О. Наладчика", "Ф.И.О. оператора", "приоритет", "Деталь", "№ док.", "№ поз.", "№ оп.", 
+      "остаток по заказам, шт", "Тшт мин", "Тнал мин", "интенсивность", "План, шт", "План, мин", 
+      "Факт, шт", "Факт, мин", "Стоимость минуты", "Наработка план", "Наработка факт", "Подпись",
+      timeLabels[0], "", timeLabels[1], "", timeLabels[2], "", timeLabels[3], "", timeLabels[4], "", timeLabels[5], ""
+    ])); // 3
+    
+    var timeHeaderRow = 2; 
+
+    function appendGroup(groupTitle, machinesData) {
+      if (!machinesData || Object.keys(machinesData).length === 0) return;
+      
+      output.push(makeRow([groupTitle])); 
+      formattingInfo.groupRows.push(output.length); 
+      
+      var machineKeys = Object.keys(machinesData).sort();
+      for (var mIdx = 0; mIdx < machineKeys.length; mIdx++) {
+        var machine = machineKeys[mIdx];
+        
+        output.push(makeRow([machine])); 
+        formattingInfo.machineRows.push(output.length); 
+        
+        var tasks = machinesData[machine];
+        tasks.sort(function(a, b) {
+          return new Date(a[colStart]) - new Date(b[colStart]);
+        });
+        
+        for (var j = 0; j < tasks.length; j++) {
+          var t = tasks[j];
+          var rowNum = output.length + 1; 
+          formattingInfo.taskRows.push(rowNum); 
+          
+          var tSh = parseFloat(String(t[colTSh]).replace(',', '.')) || 0;
+          var price = parseFloat(String(t[colPrice]).replace(',', '.')) || 0;
+          var setupStatus = String(t[colSetupDone]).trim().toLowerCase();
+          var tNal = ""; 
+          
+          if (setupStatus.indexOf("нет") === 0 && setupStatus.indexOf("завершена") === -1) {
+            var match = setupStatus.match(/\d+/);
+            if (match) tNal = parseFloat(match[0]); 
+          }
+
+          var tr = makeRow([
+            "", "", String(t[colPrior]).trim(), String(t[colItemCode]).trim(), t[colOrder], t[colBelPos], t[colPos],
+            t[colRemain], tSh, tNal, parseFloat(String(t[colIntens]).replace(',','.'))||0, 
+            t[colPlanQty], "", "", "", price, "", "", "" 
+          ]);
+          
+          // M = I * L (План мин = Тшт мин * План шт)
+          tr[12] = "=$I" + rowNum + "*$L" + rowNum;
+          
+          // Q = M * P (Наработка = План мин * Стоимость минуты)
+          tr[16] = "=$M" + rowNum + "*$P" + rowNum;
+          
+          var fTemplate = `=IFERROR(ROUNDDOWN((%COL%$${timeHeaderRow}-N($J${rowNum}))/$I${rowNum}; 0); "")`;
+          
+          tr[19] = fTemplate.replace("%COL%", "T"); tr[21] = fTemplate.replace("%COL%", "V"); 
+          tr[23] = fTemplate.replace("%COL%", "X"); tr[25] = fTemplate.replace("%COL%", "Z"); 
+          tr[27] = fTemplate.replace("%COL%", "AB"); tr[29] = fTemplate.replace("%COL%", "AD");
+          
+          output.push(tr);
+        }
+      }
+    }
+
+    appendGroup("Фрезерная группа", shiftObj.milling);
+    appendGroup("Токарная группа", shiftObj.turning);
+
+    if (output.length <= 3) return; 
+
+    var dataRowsCount = output.length;
+    
+    var range = targetSheet.getRange(1, 1, dataRowsCount, 31);
+    range.setValues(output);
+
+    var footerStartRow = dataRowsCount + 2;
+    var templateRange = checkSheet.getRange("C1:R7");
+    var targetFooterRange = targetSheet.getRange(footerStartRow, 1);
+    templateRange.copyTo(targetFooterRange);
+    targetSheet.getRange(footerStartRow, 3).setDataValidation(masterRule);
+
+    range.setHorizontalAlignment("center").setVerticalAlignment("middle");
+    targetSheet.getRange(1, 1, dataRowsCount, 2).setHorizontalAlignment("left"); 
+    targetSheet.setColumnWidth(1, 160); 
+    targetSheet.setColumnWidth(2, 130);
+    for(var c = 20; c <= 31; c++) targetSheet.setColumnWidth(c, 45);
+
+    targetSheet.getRange(1, 20, 1, 12).mergeAcross().setBackground("#fff2cc").setFontWeight("bold");
+    targetSheet.getRange(2, 1, dataRowsCount - 1, 31).setBorder(true, true, true, true, true, true);
+    targetSheet.getRange(2, 1, 2, 31).setFontWeight("bold").setBackground(COLOR_HEADER_BG).setWrap(true);
+
+    if (dataRowsCount >= 4) {
+      targetSheet.getRange(4, 1, dataRowsCount - 3, 2).setBackground(COLOR_FIO_BG).setDataValidation(nameRule);
+      targetSheet.getRange(4, 12, dataRowsCount - 3, 1).setBackground(COLOR_PLAN_BG);
+      
+      targetSheet.getRange(4, 9, dataRowsCount - 3, 3).setNumberFormat("0.00");
+      targetSheet.getRange(4, 12, dataRowsCount - 3, 2).setNumberFormat("0.00");
+      targetSheet.getRange(4, 16, dataRowsCount - 3, 2).setNumberFormat("0.00");
+      targetSheet.getRange(4, 20, dataRowsCount - 3, 12).setNumberFormat("0");
+    }
+
+    for (var i = 0; i < formattingInfo.machineRows.length; i++) {
+      var r = formattingInfo.machineRows[i];
+      targetSheet.getRange(r, 1, 1, 31).setFontWeight("bold").setBackground(COLOR_MACHINE_BG).clearDataValidations();
+      targetSheet.getRange(r, 1, 1, 2).merge();
+    }
+
+    for (var i = 0; i < formattingInfo.groupRows.length; i++) {
+      var r = formattingInfo.groupRows[i];
+      targetSheet.getRange(r, 1, 1, 31).setFontWeight("bold").setBackground(COLOR_GROUP_BG).clearDataValidations();
+      targetSheet.getRange(r, 1, 1, 2).merge();
+    }
+  }
+
+  var allShifts = Object.keys(shiftsData);
+  allShifts.forEach(function(shiftNameFull) {
+    var sheetName = shiftNameFull.substring(0, 31);
+    buildSingleTableSheet(sheetName, shiftNameFull, shiftsData[shiftNameFull]);
+  });
+  
+  SpreadsheetApp.getUi().alert("Сформировано!");
+}
+
+
+// =====================================================================
+// ПАРСИНГ И ЭКСПОРТ РУЧНОГО ПЛАНА 
+// Читает строго сгенерированные листы "смена", исходники НЕ используются.
+// =====================================================================
+function exportManualPlanToDB() {
+  var ui = SpreadsheetApp.getUi();
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var sheets = ss.getSheets();
+  var rowsToUpload = [];
+  var uniqueDates = [];
+
+  for (var s = 0; s < sheets.length; s++) {
+    var sheet = sheets[s];
+    var sheetName = sheet.getName();
+    
+    if (sheetName.toLowerCase().indexOf("смена") !== -1) {
+      try {
+        var parsedRows = parseShiftSheet(sheet);
+        if (parsedRows && parsedRows.length > 0) {
+          rowsToUpload = rowsToUpload.concat(parsedRows);
+          parsedRows.forEach(function(r) {
+            if (uniqueDates.indexOf(r.Date) === -1) {
+              uniqueDates.push(r.Date);
+            }
+          });
+        }
+      } catch (e) {
+        ui.alert("Ошибка парсинга листа '" + sheetName + "':\n" + e.toString());
+        return;
+      }
+    }
+  }
+
+  if (rowsToUpload.length === 0) {
+    ui.alert("Не найдено корректных строк сменного задания для отправки.");
+    return;
+  }
+
+  uniqueDates.sort();
+  var firstDateStr = uniqueDates[0]; 
+  var reportMonth = firstDateStr.substring(0, 7) + "-01"; 
+
+  try {
+    var API_URL = "https://meridian-sap-api.shares.zrok.io/api/raw-query/exec";
+    var currentVersion = 0; 
+    var CHUNK_SIZE = 50;    
+
+    for (var i = 0; i < rowsToUpload.length; i += CHUNK_SIZE) {
+      var chunk = rowsToUpload.slice(i, i + CHUNK_SIZE);
+      
+      var xmlData = convertToXml(chunk);
+      var escapedXml = xmlData.replace(/'/g, "''"); 
+      
+      var query = "EXEC [dbo].[SP_AddManualPlanSnapshot] @XmlData = N'" + escapedXml + "', @ReportMonth = '" + reportMonth + "', @TargetVersion = " + currentVersion;
+      
+      var options = {
+        "method": "post",
+        "contentType": "application/json",
+        "muteHttpExceptions": true,
+        "headers": { "skip_zrok_interstitial": "true" },
+        "payload": JSON.stringify({ "query": query })
+      };
+
+      var res = UrlFetchApp.fetch(API_URL, options);
+      var json = JSON.parse(res.getContentText());
+      
+      if (json.success && json.data && json.data.length > 0) {
+        if (currentVersion === 0) {
+          currentVersion = json.data[0].NewVersion;
+        }
+      } else {
+        throw new Error(json.error || json.message || res.getContentText());
+      }
+    }
+
+    ui.alert("✅ Успешно отправлено!", 
+             "Ручной план сохранен как Версия " + currentVersion + 
+             "\nМесяц: " + formatSqlDateRegex(reportMonth) + 
+             "\nВсего выгружено строк: " + rowsToUpload.length + " (частями по " + CHUNK_SIZE + ")", 
+             ui.ButtonSet.OK);
+
+  } catch (e) {
+    ui.alert("❌ Ошибка выгрузки ручного плана:\n" + e.toString());
+  }
+}
+
+/**
+ * Читает данные СТРОГО с ручной сменной таблицы.
+ */
+function parseShiftSheet(sheet) {
+  var values = sheet.getDataRange().getValues();
+  if (values.length < 4) return [];
+
+  var rawDateStr = String(values[0][3]).trim(); 
+  var rawShiftNo = String(values[0][5]).trim(); 
+  
+  if (!rawDateStr || !rawShiftNo) return [];
+
+  var parsedDate = formatDateToYmd(rawDateStr);
+  if (!parsedDate) return [];
+
+  var vonStr = "";
+  var bisStr = "";
+  if (rawShiftNo === "1") {
+    vonStr = parsedDate + " 07:00:00";
+    bisStr = parsedDate + " 19:00:00";
+  } else {
+    vonStr = parsedDate + " 19:00:00";
+    var dateParts = parsedDate.split("-");
+    var dateObj = new Date(parseInt(dateParts[0]), parseInt(dateParts[1]) - 1, parseInt(dateParts[2]));
+    dateObj.setDate(dateObj.getDate() + 1);
+    var nextDayStr = Utilities.formatDate(dateObj, Session.getScriptTimeZone(), "yyyy-MM-dd");
+    bisStr = nextDayStr + " 07:00:00";
+  }
+
+  var shiftNameFull = rawShiftNo + " смена " + formatDateValue(rawDateStr);
+  var rows = [];
+  var currentMachine = "";
+  var currentMachineDesc = "";
+
+  for (var r = 3; r < values.length; r++) {
+    var firstCol = String(values[r][0]).trim();
+    var colDetail = String(values[r][3]).trim(); // D (3)
+    var colOrder = String(values[r][4]).trim();  // E (4) - теперь называется "№ док."
+
+    if (firstCol.indexOf("Выдал") === 0 || firstCol.indexOf("Смену сдал") === 0) break;
+    if (firstCol.indexOf("Фрезерная группа") === 0 || firstCol.indexOf("Токарная группа") === 0) continue;
+
+    if (firstCol !== "" && colDetail === "" && colOrder === "") {
+      var match = firstCol.match(/^([A-Za-z0-9]+)\s*\((.+)\)/);
+      if (match) {
+        currentMachine = match[1].trim();
+        currentMachineDesc = match[2].trim();
+      } else {
+        currentMachine = firstCol;
+        currentMachineDesc = "";
+      }
+      continue;
+    }
+
+    if (colDetail !== "" && colOrder !== "") {
+      var belPosId = parseInt(values[r][5]) || 0;  // F (5)
+      var posId = parseInt(values[r][6]) || 0;     // G (6)
+      
+      var remainQty = parseNumber(values[r][7]);   // H (7)
+      var tSh = parseNumber(values[r][8]);         // I (8)
+      var tNal = parseNumber(values[r][9]);        // J (9)
+      var intens = parseNumber(values[r][10]);     // K (10)
+      var planQty = parseNumber(values[r][11]);    // L (11) - План, шт
+      
+      // M (12) - План мин, N (13) - Факт шт, O (14) - Факт мин (мы их пропускаем, но они есть на листе)
+      
+      // Считываем Стоимость и Наработку ТОЧНО ИЗ ВАШЕЙ ТАБЛИЦЫ, а не из исходников!
+      var price = parseNumber(values[r][15]);      // P (15) - Стоимость минуты
+      var narabotka = parseNumber(values[r][16]);  // Q (16) - Наработка план
+
+      var setupText = "Да (Идет обработка)";
+      if (tNal > 0) {
+        setupText = "Нет (наладка " + tNal + " мин)";
+      } else {
+        setupText = "Нет (наладка завершена)";
+      }
+
+      rows.push({
+        "PRIOR_ID": String(values[r][2]).trim(),
+        "ItemCode": colDetail,
+        "ItemName": "", 
+        "BELNR_ID": parseInt(colOrder) || 0, // Сохраняем тег BELNR_ID для совместимости с SQL, хоть в шапке и № док.
+        "BELPOS_ID": belPosId,
+        "POS_ID": posId,
+        "RESOURCE": currentMachine,
+        "Описание станка": currentMachineDesc,
+        "Shift": shiftNameFull,
+        "Setup_Done": setupText,
+        "VERURSACHER_AGBEZ": posId + " Операция",
+        "VON": vonStr,
+        "BIS": bisStr,
+        "Duration": 720.0,
+        "MENGE": remainQty,
+        "Plan_Qty_Details": planQty,
+        "TEAPLATZ": tSh,
+        "TRAPLATZ": tNal,
+        "gc_intensity_fact": intens,
+        "TEAPLATZ_ALT": tSh,
+        "Remainder_Order": remainQty,
+        "Price_for_1_min": price,
+        "Narabotka_plan": narabotka,
+        "Date": parsedDate
+      });
+    }
+  }
+
+  return rows;
+}
+
+function convertToXml(rows) {
+  var xml = "<rows>";
+  for (var i = 0; i < rows.length; i++) {
+    var r = rows[i];
+    xml += "<row>";
+    xml += "<PRIOR_ID>" + escapeXml(r.PRIOR_ID) + "</PRIOR_ID>";
+    xml += "<ItemCode>" + escapeXml(r.ItemCode) + "</ItemCode>";
+    xml += "<ItemName>" + escapeXml(r.ItemName) + "</ItemName>";
+    xml += "<BELNR_ID>" + r.BELNR_ID + "</BELNR_ID>";
+    xml += "<BELPOS_ID>" + r.BELPOS_ID + "</BELPOS_ID>";
+    xml += "<POS_ID>" + r.POS_ID + "</POS_ID>";
+    xml += "<RESOURCE>" + escapeXml(r.RESOURCE) + "</RESOURCE>";
+    xml += "<MachineDesc>" + escapeXml(r["Описание станка"]) + "</MachineDesc>"; 
+    xml += "<Shift>" + escapeXml(r.Shift) + "</Shift>";
+    xml += "<Setup_Done>" + escapeXml(r.Setup_Done) + "</Setup_Done>";
+    xml += "<VERURSACHER_AGBEZ>" + escapeXml(r.VERURSACHER_AGBEZ) + "</VERURSACHER_AGBEZ>";
+    xml += "<VON>" + r.VON + "</VON>";
+    xml += "<BIS>" + r.BIS + "</BIS>";
+    xml += "<Duration>" + r.Duration + "</Duration>";
+    xml += "<MENGE>" + r.MENGE + "</MENGE>";
+    xml += "<Plan_Qty_Details>" + r.Plan_Qty_Details + "</Plan_Qty_Details>";
+    xml += "<TEAPLATZ>" + r.TEAPLATZ + "</TEAPLATZ>";
+    xml += "<TRAPLATZ>" + r.TRAPLATZ + "</TRAPLATZ>";
+    xml += "<gc_intensity_fact>" + r.gc_intensity_fact + "</gc_intensity_fact>";
+    xml += "<TEAPLATZ_ALT>" + r.TEAPLATZ_ALT + "</TEAPLATZ_ALT>";
+    xml += "<Remainder_Order>" + r.Remainder_Order + "</Remainder_Order>";
+    // Значения, считанные с ручной сменной таблицы
+    xml += "<Price_for_1_min>" + r.Price_for_1_min + "</Price_for_1_min>";
+    xml += "<Narabotka_plan>" + r.Narabotka_plan + "</Narabotka_plan>";
+    xml += "<Date>" + r.Date + "</Date>";
+    xml += "</row>";
+  }
+  xml += "</rows>";
+  return xml;
+}
+
+function escapeXml(unsafe) {
+  if (unsafe === null || unsafe === undefined) return "";
+  return unsafe.toString().replace(/[<>&'"]/g, function (c) {
+    switch (c) {
+      case '<': return '&lt;';
+      case '>': return '&gt;';
+      case '&': return '&amp;';
+      case '\'': return '&apos;';
+      case '"': return '&quot;';
+    }
+  });
+}
+
+function formatSqlDateRegex(sqlDateStr) {
+  if (!sqlDateStr) return '';
+  var match = sqlDateStr.toString().match(/(\d{4})-(\d{2})-(\d{2})/);
+  return match ? match[3] + "." + match[2] + "." + match[1] : sqlDateStr;
+}
+
+function parseNumber(val) {
+  if (!val) return 0;
+  return parseFloat(val.toString().replace(',', '.')) || 0;
+}
+
+function formatDateToYmd(val) {
+  if (!val) return null;
+  if (val instanceof Date) {
+    return Utilities.formatDate(val, Session.getScriptTimeZone(), "yyyy-MM-dd");
+  }
+  var s = val.toString().trim();
+  var matchDmy = s.match(/^(\d{2})\.(\d{2})\.(\d{4})/);
+  if (matchDmy) {
+    return matchDmy[3] + "-" + matchDmy[2] + "-" + matchDmy[1];
+  }
+  var matchYmd = s.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (matchYmd) return s.substring(0, 10);
+  return null;
+}
+
+function formatDateValue(val) {
+  if (!val) return "";
+  if (val instanceof Date) {
+    return Utilities.formatDate(val, Session.getScriptTimeZone(), "dd.MM.yyyy");
+  }
+  var s = val.toString().trim();
+  var matchYmd = s.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (matchYmd) {
+    return matchYmd[3] + "." + matchYmd[2] + "." + matchYmd[1];
+  }
+  var matchDmy = s.match(/^(\d{2})\.(\d{2})\.(\d{4})/);
+  if (matchDmy) {
+    return s.substring(0, 10);
+  }
+  return s;
+}
+```
