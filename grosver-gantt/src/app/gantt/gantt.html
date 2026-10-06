@@ -1,0 +1,177 @@
+<div class="gantt-app-wrapper">
+  
+  <!-- ВСПЛЫВАЮЩИЙ ТОСТ ОБ УСПЕШНОМ ФОРМИРОВАНИИ -->
+  @if (showToast) {
+    <div class="toast-notification">
+      <span class="toast-icon">✓</span>
+      <span class="toast-text">{{ toastMessage }}</span>
+      <button type="button" class="toast-close" (click)="showToast = false">✕</button>
+    </div>
+  }
+
+  <!-- СПИННЕР ЗАГРУЗКИ (КРУТИЛКА) -->
+  @if (isLoading) {
+    <div class="loading-overlay">
+      <div class="spinner"></div>
+      <div class="loading-text">Загрузка данных и формирование Ганта...</div>
+    </div>
+  }
+
+  <header class="gantt-header">
+    
+    <!-- Группа 1: Название и переключатели таблицы -->
+    <div class="header-group">
+      <h2 class="title">Загрузка оборудования</h2>
+      <div class="view-controls">
+        <button type="button" class="btn-toggle-view" (click)="toggleCompactView()">
+          {{ isCompactView ? '📋 Полный вид' : '🏷️ Только № детали' }}
+        </button>
+        <button type="button" class="btn-toggle-grid" (click)="toggleGrid()">
+          {{ isGridVisible ? '◀ Скрыть таблицу' : '▶ Таблица' }}
+        </button>
+      </div>
+    </div>
+
+    <!-- Группа 2: Фильтр по Станкам -->
+    <div class="header-group filter-wrapper">
+      <button 
+        type="button" 
+        class="btn-dropdown-filter" 
+        [class.has-filter]="selectedMachinesCount < totalMachinesCount"
+        (click)="toggleMachinesDropdown()">
+        ⚙️ Станки ({{ selectedMachinesCount }}/{{ totalMachinesCount }}) ▼
+      </button>
+
+      @if (isMachinesDropdownOpen) {
+        <div class="dropdown-menu">
+          <div class="dropdown-header">
+            <span class="dropdown-title">Фильтр станков</span>
+            <button type="button" class="btn-close-dropdown" (click)="toggleMachinesDropdown()">✕</button>
+          </div>
+          
+          <div class="dropdown-search">
+            <input 
+              type="text" 
+              placeholder="Поиск станка..." 
+              [(ngModel)]="machineSearchQuery" 
+              (input)="filterMachinesList()" 
+            />
+          </div>
+
+          <div class="dropdown-actions">
+            <button type="button" (click)="selectAllMachines(true)">Выбрать все</button>
+            <button type="button" (click)="selectAllMachines(false)">Снять все</button>
+          </div>
+
+          <div class="dropdown-list">
+            @for (machine of visibleMachinesList; track machine.id) {
+              <label class="checkbox-row">
+                <input 
+                  type="checkbox" 
+                  [(ngModel)]="machine.selected" 
+                  (change)="onMachineChange()" 
+                />
+                <span class="badge-code">{{ machine.id }}</span>
+                <span class="row-label">{{ machine.name }}</span>
+              </label>
+            }
+            @if (visibleMachinesList.length === 0) {
+              <div class="no-items-found">Станки не найдены</div>
+            }
+          </div>
+        </div>
+      }
+    </div>
+
+    <!-- Группа 3: Фильтр по Деталям -->
+    <div class="header-group filter-wrapper">
+      <button 
+        type="button" 
+        class="btn-dropdown-filter" 
+        [class.has-filter]="selectedPartsCount < totalPartsCount"
+        (click)="togglePartsDropdown()">
+        🏷️ Детали ({{ selectedPartsCount }}/{{ totalPartsCount }}) ▼
+      </button>
+
+      @if (isPartsDropdownOpen) {
+        <div class="dropdown-menu">
+          <div class="dropdown-header">
+            <span class="dropdown-title">Детали выбранных станков</span>
+            <button type="button" class="btn-close-dropdown" (click)="togglePartsDropdown()">✕</button>
+          </div>
+          
+          <div class="dropdown-search">
+            <input 
+              type="text" 
+              placeholder="Поиск по № или названию..." 
+              [(ngModel)]="partSearchQuery" 
+              (input)="filterPartsList()" 
+            />
+          </div>
+
+          <div class="dropdown-actions">
+            <button type="button" (click)="selectAllParts(true)">Выбрать все</button>
+            <button type="button" (click)="selectAllParts(false)">Снять все</button>
+          </div>
+
+          <div class="dropdown-list">
+            @for (part of visiblePartsList; track part.code) {
+              <label class="checkbox-row">
+                <input 
+                  type="checkbox" 
+                  [(ngModel)]="part.selected" 
+                  (change)="onPartSelectionChange()" 
+                />
+                <span class="badge-code">{{ part.code }}</span>
+                <span class="row-label">{{ part.name }}</span>
+              </label>
+            }
+            @if (visiblePartsList.length === 0) {
+              <div class="no-items-found">Для выбранных станков нет деталей</div>
+            }
+          </div>
+        </div>
+      }
+    </div>
+
+    <!-- Группа 4: Фильтр диапазона дат -->
+    <div class="header-group date-filter">
+      <span class="filter-label">Период:</span>
+      <input type="date" [(ngModel)]="filterFrom" (change)="applyDateFilter()" />
+      <span class="filter-sep">—</span>
+      <input type="date" [(ngModel)]="filterTo" (change)="applyDateFilter()" />
+      <button type="button" class="btn-clear-date" (click)="resetDateFilter()">✕ Все</button>
+    </div>
+
+    <!-- Группа 5: Масштаб и навигация -->
+    <div class="header-group">
+      <div class="zoom-controls">
+        <span class="zoom-label">Масштаб:</span>
+        <button type="button" (click)="setZoom('months')">Месяцы</button>
+        <button type="button" (click)="setZoom('weeks')">Недели</button>
+        <button type="button" (click)="setZoom('days')" class="active">Дни</button>
+        <button type="button" (click)="setZoom('hours')">Часы</button>
+        <button type="button" class="btn-fit" (click)="zoomToFit()" title="Показать весь график на одном экране">🔍 Вписать</button>
+      </div>
+      <div class="scroll-arrows">
+        <button type="button" (click)="scrollTimeline('left')" title="Прокрутить влево">◀</button>
+        <button type="button" (click)="scrollTimeline('right')" title="Прокрутить вправо">▶</button>
+      </div>
+    </div>
+
+    <!-- Группа 6: Действия -->
+    <div class="header-group actions">
+      <button 
+        type="button" 
+        class="btn-refresh" 
+        [disabled]="isLoading"
+        (click)="loadData()">
+        {{ isLoading ? '⏳ Загрузка...' : '🔄 Обновить' }}
+      </button>
+      <button type="button" class="btn-logout" (click)="logout()">Выйти</button>
+    </div>
+
+  </header>
+
+  <div #ganttContainer class="gantt-container"></div>
+</div>
