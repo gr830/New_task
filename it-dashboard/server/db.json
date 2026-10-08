@@ -1,0 +1,162 @@
+{
+  "departments": [
+    {
+      "id": "dep_1",
+      "name": "Технологический отдел"
+    },
+    {
+      "id": "dep_2",
+      "name": "Бухгалтерия"
+    },
+    {
+      "id": "dep_3",
+      "name": "IT Отдел"
+    }
+  ],
+  "employees": [
+    {
+      "id": "emp_1",
+      "name": "Светлана Коновалова",
+      "departmentId": "dep_1"
+    },
+    {
+      "id": "emp_2",
+      "name": "Ольга Довгялло-Сарвирова",
+      "departmentId": "dep_2"
+    },
+    {
+      "id": "emp_3",
+      "name": "Иван Сисадмин",
+      "departmentId": "dep_3"
+    }
+  ],
+  "software_catalog": [
+    {
+      "id": "cat_1",
+      "name": "1С: Предприятие"
+    },
+    {
+      "id": "cat_2",
+      "name": "MS SQL Server"
+    },
+    {
+      "id": "cat_3",
+      "name": "Битрикс24"
+    },
+    {
+      "id": "cat_4",
+      "name": "WMS Склад"
+    },
+    {
+      "id": "kLT_H8X_Ep4",
+      "name": "NEW"
+    }
+  ],
+  "computers": [
+    {
+      "id": "comp_1",
+      "name": "Grosver-43",
+      "ip": "192.168.1.43",
+      "employeeId": "emp_1"
+    },
+    {
+      "id": "comp_2",
+      "name": "SRV-DB-01",
+      "ip": "192.168.1.10",
+      "employeeId": "emp_3"
+    },
+    {
+      "id": "comp_3",
+      "name": "SRV-WEB-01",
+      "ip": "192.168.1.20",
+      "employeeId": "emp_2"
+    }
+  ],
+  "installed_software": [
+    {
+      "computerId": "comp_1",
+      "softwareCatalogId": "cat_1",
+      "version": "8.3",
+      "licenseKey": "",
+      "expiryDate": "",
+      "id": "X2lYcstTA1M"
+    },
+    {
+      "computerId": "comp_1",
+      "softwareCatalogId": "cat_3",
+      "version": "2.2",
+      "licenseKey": "",
+      "expiryDate": "",
+      "id": "FsCosL__Ghc"
+    },
+    {
+      "computerId": "comp_1",
+      "softwareCatalogId": "cat_4",
+      "version": "2.5",
+      "licenseKey": "",
+      "expiryDate": "",
+      "id": "OG2LR3il8f8"
+    },
+    {
+      "computerId": "comp_1",
+      "softwareCatalogId": "cat_2",
+      "version": "2.3",
+      "licenseKey": "4845-6565-588",
+      "expiryDate": "2026-10-24",
+      "id": "_hA0WJ6m6BY"
+    },
+    {
+      "computerId": "comp_2",
+      "softwareCatalogId": "cat_1",
+      "version": "1.2",
+      "licenseKey": "",
+      "expiryDate": "",
+      "id": "H97urwQ19aY"
+    }
+  ],
+  "links": [
+    {
+      "id": "link_1",
+      "fromInstalledId": "inst_1",
+      "toInstalledId": "inst_2",
+      "type": "SQL Connection (порт 1433)",
+      "description": "1С на Grosver-43 подключается к БД на SRV-DB-01"
+    },
+    {
+      "id": "link_2",
+      "fromInstalledId": "inst_1",
+      "toInstalledId": "inst_3",
+      "type": "REST API",
+      "description": "Синхронизация заказов 1С и Битрикс"
+    },
+    {
+      "fromInstalledId": "inst_2",
+      "toInstalledId": "inst_3",
+      "type": "ПОРТ",
+      "description": "ВЫГРУЗКА",
+      "id": "8nPjwI-YrXc"
+    },
+    {
+      "fromInstalledId": "X2lYcstTA1M",
+      "toInstalledId": "FsCosL__Ghc",
+      "type": "1433",
+      "description": "ВЫГРУЗКА",
+      "id": "r_uI8FVEfxM"
+    },
+    {
+      "fromInstalledId": "OG2LR3il8f8",
+      "toInstalledId": "FsCosL__Ghc",
+      "type": "REST",
+      "description": "ПРЯМОЕ ПОДКЛЮЧЕНИЯ",
+      "id": "gdFAR0q1QE4"
+    },
+    {
+      "fromInstalledId": "_hA0WJ6m6BY",
+      "toInstalledId": "X2lYcstTA1M",
+      "type": "ПОРТ",
+      "description": "ОЛРЛОРЛ",
+      "id": "CCzg-ukYGU8"
+    }
+  ],
+  "$schema": "./node_modules/json-server/schema.json"
+}
