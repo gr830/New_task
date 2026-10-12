@@ -125,4 +125,12 @@ export class ApiService {
   deleteNetworkLink(id: string): Observable<void> {
     return this.http.delete<void>(`${this.baseUrl}/network_links/${id}`);
   }
+
+  // --- НАСТРОЙКИ СЕТЕВОГО МОНИТОРИНГА ---
+  getNetworkSettings(): Observable<any> {
+    return this.http.get<any>(`${this.baseUrl}/network_settings/config`);
+  }
+  updateNetworkSettings(data: any): Observable<any> {
+    return this.http.patch<any>(`${this.baseUrl}/network_settings/config`, data);
+  }
 }

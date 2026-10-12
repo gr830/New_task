@@ -27,6 +27,32 @@ import cytoscape, { Core } from 'cytoscape';
         </div>
 
         <div class="actions-group">
+          <!-- ВЫБОР ИНТЕРВАЛА И КНОПКА ОБНОВИТЬ ВРУЧНУЮ -->
+          <div class="timer-controls">
+            <label>⏱️ Опрос:</label>
+            <select [(ngModel)]="selectedIntervalType" (change)="onIntervalChange()">
+              <option value="1s">1 сек</option>
+              <option value="5s">5 сек (по умолч.)</option>
+              <option value="1m">1 мин</option>
+              <option value="5m">5 мин</option>
+              <option value="10m">10 мин</option>
+              <option value="custom">Свой интервал</option>
+            </select>
+
+            @if (selectedIntervalType === 'custom') {
+              <div class="custom-sec-wrap">
+                <input type="number" min="1" [(ngModel)]="customIntervalSec" (change)="onIntervalChange()" style="width: 50px;" />
+                <span>сек</span>
+              </div>
+            }
+
+            <button class="btn icon-btn refresh-btn" [class.spinning]="isRefreshing" (click)="manualRefresh()" title="Обновить статусы прямо сейчас">
+              🔄
+            </button>
+          </div>
+
+          <div class="divider"></div>
+
           <!-- Загрузка с компрессией -->
           <label class="btn outline file-upload">
             🖼️ Загрузить фон (Авто-сжатие)
@@ -90,14 +116,17 @@ import cytoscape, { Core } from 'cytoscape';
       @if (showPollingInfo) {
         <div class="modal-backdrop" style="z-index: 2000;">
           <div class="modal">
-            <h3>ℹ️ Способы опроса оборудования</h3>
-            <p style="font-size: 13px; color: #475569; line-height: 1.5;">
-              В реальной Enterprise-системе опросом занимаются <b>серверные агенты</b> (Zabbix Proxy, Node.js workers):<br><br>
-              <b>ICMP Ping:</b> Отправка эхо-запросов на уровне ОС для проверки доступности узла.<br>
-              <b>SNMP:</b> Опрос сетевого оборудования по портам 161/162 (сбор трафика, CPU, портов).<br>
-              <b>TCP Port:</b> Проверка, открыт ли конкретный порт (например, 1433 для SQL).<br>
-              <b>HTTP API:</b> Выполнение GET/POST запросов для проверки состояния сервисов.<br><br>
-              <i>В данной демо-версии мониторинг симулируется внутренним таймером Angular (с шансом потери связи 5% для демонстрации реакции дашборда).</i>
+            <h3>ℹ️ Реальный мониторинг сети (Enterprise Poller Service)</h3>
+            <p style="font-size: 13px; color: #475569; line-height: 1.6;">
+              Мониторинг выполняется реальным серверным сервисом <b>poller.js</b> в фоновом режиме:<br><br>
+              <b>🟢 ICMP Ping:</b> Реальная отправка ICMP echo-пакетов через сетевой стек ОС. Проверяет физическую доступность хоста.<br>
+              <b>🔌 TCP Port Scan:</b> Реальная проверка доступности порта через прямое сокет-соединение (например: <code>192.168.250.139:8291</code> для WinBox, <code>:1433</code> для SQL, <code>:80</code> для Web).<br>
+              <b>🌐 HTTP API:</b> Выполнение реальных GET-запросов к веб-сервисам с проверкой кодов ответа HTTP 200.<br>
+              <b>📡 SNMP:</b> Базовая диагностика сетевых интерфейсов управляемых коммутаторов и маршрутизаторов.<br><br>
+              <b>Цветовая индикация:</b><br>
+              • 🟢 <b>Зеленый:</b> Оборудование отвечает на запросы и активно в сети.<br>
+              • 🟡 <b>Желтый:</b> Оборудование добавлено на план, но IP-адрес не указан (требуется настройка).<br>
+              • 🔴 <b>Красный:</b> Оборудование недоступно (таймаут пинга или закрыт порт).
             </p>
             <div class="modal-actions"><button class="btn blue" (click)="showPollingInfo = false">Понятно</button></div>
           </div>
@@ -150,8 +179,12 @@ import cytoscape, { Core } from 'cytoscape';
           
           <div class="legend">
             <span class="pulse-dot green"></span> В сети (Online)
+            <span class="pulse-dot yellow"></span> Не настроен (Нет IP)
             <span class="pulse-dot red"></span> Ошибка (Offline)
-            <span class="hint" style="margin-left:auto;"><b>Правый клик</b> по узлу — скрыть/раскрыть его дерево связей.</span>
+            <span class="hint" style="margin-left:auto;">
+              ⏱️ Авто-опрос: <b>{{ selectedIntervalType === 'custom' ? customIntervalSec + ' сек.' : selectedIntervalType }}</b> | 
+              <b>Правый клик</b> по узлу — скрыть/раскрыть связи.
+            </span>
           </div>
 
           <div class="cy-container" #cy></div>
@@ -166,7 +199,11 @@ import cytoscape, { Core } from 'cytoscape';
             </div>
             
             <div class="status-banner" [ngClass]="selectedDevice.status">
-              {{ selectedDevice.status === 'online' ? '🟢 ONLINE (Отвечает)' : '🔴 OFFLINE (Нет пинга)' }}
+              {{ 
+                selectedDevice.status === 'online' ? '🟢 ONLINE (Отвечает)' : 
+                selectedDevice.status === 'warning' ? '🟡 ВНИМАНИЕ (Не указан IP)' : 
+                '🔴 OFFLINE (Нет ответа)' 
+              }}
             </div>
 
             <div class="meta-row"><label>Тип:</label> <b>{{ selectedDevice.type }}</b></div>
@@ -252,7 +289,10 @@ import cytoscape, { Core } from 'cytoscape';
     
     .status-banner { padding: 10px; border-radius: 6px; font-weight: bold; text-align: center; margin-bottom: 16px; color: white; }
     .status-banner.online { background: #10b981; }
+    .status-banner.warning { background: #f59e0b; } /* Желтый баннер */
     .status-banner.offline { background: #ef4444; }
+
+    .pulse-dot.yellow { background: #f59e0b; box-shadow: 0 0 0 rgba(245, 158, 11, 0.4); } /* Желтая точка */
     
     .meta-row { margin-bottom: 8px; font-size: 13px; }
     .meta-row label { color: #64748b; display: block; font-size: 11px; margin-bottom: 2px; }
@@ -275,6 +315,14 @@ import cytoscape, { Core } from 'cytoscape';
     .check-item { display: flex; align-items: center; gap: 8px; font-size: 13px; padding: 4px; border-radius: 4px; cursor: pointer; }
     .check-item:hover { background: #f8fafc; }
     .check-item.selected { background: #eff6ff; }
+
+    .timer-controls { display: flex; align-items: center; gap: 6px; background: #f8fafc; padding: 3px 8px; border-radius: 6px; border: 1px solid #cbd5e1; font-size: 12px; }
+    .timer-controls select { padding: 4px 8px; border: 1px solid #cbd5e1; border-radius: 4px; font-size: 12px; background: white; cursor: pointer; }
+    .custom-sec-wrap { display: flex; align-items: center; gap: 3px; font-size: 11px; color: #475569; }
+    .custom-sec-wrap input { padding: 3px 5px; border: 1px solid #cbd5e1; border-radius: 4px; font-size: 12px; }
+    
+    .refresh-btn { padding: 4px 8px; font-size: 13px; cursor: pointer; }
+    .refresh-btn.spinning { animation: spin 0.6s linear infinite; }
   `]
 })
 export class NetworkTopologyComponent implements OnInit, OnDestroy {
@@ -287,6 +335,12 @@ export class NetworkTopologyComponent implements OnInit, OnDestroy {
 
   cyInstance: Core | null = null;
   pollingTimer: any;
+  
+  // НАСТРОЙКИ ТАЙМЕРА ОБНОВЛЕНИЯ:
+  refreshInterval = 5000;
+  selectedIntervalType = '5s';
+  customIntervalSec = 30;
+  isRefreshing = false;
 
   dashboards: NetworkDashboard[] = [];
   devices: NetworkDevice[] = [];
@@ -321,7 +375,7 @@ export class NetworkTopologyComponent implements OnInit, OnDestroy {
 
   ngOnInit() {
     this.loadData();
-    this.pollingTimer = setInterval(() => this.simulateMonitoring(), 5000);
+    this.restartPollingTimer();
   }
 
   ngOnDestroy() {
@@ -343,6 +397,19 @@ export class NetworkTopologyComponent implements OnInit, OnDestroy {
         });
       });
     });
+
+    this.api.getNetworkSettings().subscribe({
+      next: cfg => {
+        if (cfg) {
+          this.refreshInterval = cfg.pollIntervalMs || 5000;
+          this.selectedIntervalType = cfg.intervalType || '5s';
+          this.customIntervalSec = cfg.customSec || 30;
+          this.restartPollingTimer();
+          this.cdr.detectChanges();
+        }
+      },
+      error: () => {}
+    });
   }
 
   getIconForType(type: NetworkDeviceType | string): string {
@@ -352,6 +419,15 @@ export class NetworkTopologyComponent implements OnInit, OnDestroy {
       'Станок ЧПУ': '⚙️', 'Камера': '📹', 'Другой': '📦'
     };
     return icons[type] || '📦';
+  }
+
+  // Генерирует SVG для отображения иконки внутри квадрата:
+  getIconSvg(type: NetworkDeviceType | string): string {
+    const icon = this.getIconForType(type);
+    const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="46" height="46">
+      <text x="50%" y="58%" dominant-baseline="middle" text-anchor="middle" font-size="24">${icon}</text>
+    </svg>`;
+    return `data:image/svg+xml;utf8,${encodeURIComponent(svg)}`;
   }
 
   onDashChange() {
@@ -524,22 +600,58 @@ export class NetworkTopologyComponent implements OnInit, OnDestroy {
     }
   }
 
-  // --- СИМУЛЯТОР ---
-  simulateMonitoring() {
+  // // --- СИМУЛЯТОР ---
+  // simulateMonitoring() {
+  //   if (!this.cyInstance || this.dashDevices.length === 0) return;
+  //   let changed = false;
+  //   this.dashDevices.forEach(d => {
+  //     const isOnline = d.status === 'online';
+  //     const random = Math.random();
+  //     if (isOnline && random < 0.05) { d.status = 'offline'; changed = true; } 
+  //     else if (!isOnline && random < 0.3) { d.status = 'online'; changed = true; }
+  //   });
+  //   if (changed) {
+  //     this.zone.run(() => {
+  //       this.dashDevices.forEach(d => this.cyInstance?.getElementById(d.id).data('status', d.status));
+  //       this.cdr.detectChanges();
+  //     });
+  //   }
+  // }
+
+  // --- РЕАЛЬНЫЙ МОНИТОРИНГ: ПОЛУЧЕНИЕ АКТУАЛЬНЫХ ДАННЫХ ИЗ БД ---
+  fetchRealStatuses() {
     if (!this.cyInstance || this.dashDevices.length === 0) return;
-    let changed = false;
-    this.dashDevices.forEach(d => {
-      const isOnline = d.status === 'online';
-      const random = Math.random();
-      if (isOnline && random < 0.05) { d.status = 'offline'; changed = true; } 
-      else if (!isOnline && random < 0.3) { d.status = 'online'; changed = true; }
-    });
-    if (changed) {
-      this.zone.run(() => {
-        this.dashDevices.forEach(d => this.cyInstance?.getElementById(d.id).data('status', d.status));
-        this.cdr.detectChanges();
+    
+    // Тихо запрашиваем свежие статусы у базы данных (которую обновляет наш Node.js Poller)
+    this.api.getNetworkDevices().subscribe(updatedDevices => {
+      let changed = false;
+      
+      // Сверяем текущие устройства на карте с пришедшими из БД
+      updatedDevices.forEach(freshDev => {
+        const localDev = this.dashDevices.find(d => d.id === freshDev.id);
+        if (localDev && localDev.status !== freshDev.status) {
+          localDev.status = freshDev.status; // Обновляем локальную модель
+          changed = true;
+        }
       });
-    }
+
+      // Если поллер нашел изменения — перекрашиваем графы на лету
+      if (changed) {
+        this.zone.run(() => {
+          this.dashDevices.forEach(d => {
+            this.cyInstance?.getElementById(d.id).data('status', d.status);
+          });
+          
+          // Если открыта боковая панель с этим устройством, обновляем и ее
+          if (this.selectedDevice) {
+            const updated = this.dashDevices.find(d => d.id === this.selectedDevice!.id);
+            if (updated) this.selectedDevice.status = updated.status;
+          }
+          
+          this.cdr.detectChanges();
+        });
+      }
+    });
   }
 
   // --- ХРАНЕНИЕ ПОЗИЦИЙ ---
@@ -569,7 +681,15 @@ export class NetworkTopologyComponent implements OnInit, OnDestroy {
     const savedPos = JSON.parse(localStorage.getItem(this.getStorageKey()) || 'null');
 
     const nodes = this.dashDevices.map(d => {
-      const node: any = { data: { id: d.id, name: `${this.getIconForType(d.type)} ${d.name}`, status: d.status, isCollapsed: false } };
+      const node: any = { 
+        data: { 
+          id: d.id, 
+          name: d.name, // Имя остается внизу под квадратом без иконки
+          iconSvg: this.getIconSvg(d.type), // Иконка пойдет ВНУТРЬ квадрата
+          status: d.status, 
+          isCollapsed: false 
+        } 
+      };
       if (savedPos && savedPos[d.id]) node.position = { x: savedPos[d.id].x, y: savedPos[d.id].y };
       return node;
     });
@@ -589,17 +709,29 @@ export class NetworkTopologyComponent implements OnInit, OnDestroy {
             'shape': 'round-rectangle',
             'label': 'data(name)',
             'text-valign': 'bottom',
-            'text-margin-y': 5,
+            'text-margin-y': 6,
             'color': '#1e293b',
             'font-size': '12px',
             'font-weight': 'bold',
-            'text-background-color': 'rgba(255,255,255,0.8)',
+            'text-background-color': 'rgba(255,255,255,0.85)',
             'text-background-opacity': 1,
             'background-color': '#ffffff',
+            
+            // ИКОНКА ВНУТРИ КВАДРАТА:
+            'background-image': 'data(iconSvg)',
+            'background-fit': 'none',
+            'background-width': '26px',
+            'background-height': '26px',
+            
             'border-width': 4,
-            'border-color': (ele: any) => ele.data('status') === 'online' ? '#10b981' : '#ef4444',
-            'width': '40px',
-            'height': '40px'
+            'border-color': (ele: any) => {
+              const status = ele.data('status');
+              if (status === 'online') return '#10b981';
+              if (status === 'warning') return '#f59e0b';
+              return '#ef4444';
+            },
+            'width': '46px',
+            'height': '46px'
           }
         },
         {
@@ -693,6 +825,55 @@ export class NetworkTopologyComponent implements OnInit, OnDestroy {
     this.cyInstance.on('tap', evt => {
       if (evt.target === this.cyInstance) {
         this.zone.run(() => { this.closeSidePanel(); });
+      }
+    });
+  }
+
+  // Смена интервала опроса:
+  onIntervalChange() {
+    if (this.selectedIntervalType === '1s') this.refreshInterval = 1000;
+    else if (this.selectedIntervalType === '5s') this.refreshInterval = 5000;
+    else if (this.selectedIntervalType === '1m') this.refreshInterval = 60000;
+    else if (this.selectedIntervalType === '5m') this.refreshInterval = 300000;
+    else if (this.selectedIntervalType === '10m') this.refreshInterval = 600000;
+    else if (this.selectedIntervalType === 'custom') this.refreshInterval = Math.max(1, this.customIntervalSec) * 1000;
+
+    // СОХРАНЯЕМ И СРАЗУ ПОСЫЛАЕМ forcePoll ДЛЯ МГНОВЕННОГО ПЕРЕКЛЮЧЕНИЯ:
+    this.api.updateNetworkSettings({
+      pollIntervalMs: this.refreshInterval,
+      intervalType: this.selectedIntervalType,
+      customSec: this.customIntervalSec,
+      forcePoll: Date.now() // Мгновенный опрос по новому времени!
+    }).subscribe(() => {
+      setTimeout(() => this.fetchRealStatuses(), 1500);
+    });
+
+    this.restartPollingTimer();
+  }
+
+  restartPollingTimer() {
+    if (this.pollingTimer) clearInterval(this.pollingTimer);
+    this.pollingTimer = setInterval(() => this.fetchRealStatuses(), this.refreshInterval);
+  }
+
+  // Ручное обновление по кнопке:
+  manualRefresh() {
+    this.isRefreshing = true;
+    this.cdr.detectChanges();
+
+    // 1. Посылаем сигнал в БД: "Немедленно разбудить поллер!"
+    this.api.updateNetworkSettings({ forcePoll: Date.now() }).subscribe({
+      next: () => {
+        // 2. Даем поллеру 1.5 секунды завершить физический пинг и забираем свежие статусы
+        setTimeout(() => {
+          this.fetchRealStatuses();
+          this.isRefreshing = false;
+          this.cdr.detectChanges();
+        }, 1500);
+      },
+      error: () => {
+        this.isRefreshing = false;
+        this.cdr.detectChanges();
       }
     });
   }
