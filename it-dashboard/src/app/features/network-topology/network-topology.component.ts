@@ -11,54 +11,63 @@ import cytoscape, { Core } from 'cytoscape';
   imports: [CommonModule, FormsModule],
   template: `
     <div class="dash-page">
-      <div class="top-bar">
-        <div class="selector-group">
-          <label>🌐 Сегмент сети (Дашборд):</label>
-          <select [(ngModel)]="activeDashId" (change)="onDashChange()" style="min-width: 250px;">
-            @for (d of dashboards; track d.id) {
-              <option [value]="d.id">🗺️ {{ d.name }}</option>
-            }
-          </select>
-          <button class="btn icon-btn" (click)="createNewDash()" title="Создать новый план">+</button>
-          @if (activeDashId) {
-            <button class="btn icon-btn danger-text" (click)="deleteCurrentDash()" title="Удалить текущий дашборд">🗑️</button>
-          }
-        </div>
-
-        <div class="actions-group">
-          <div class="timer-controls">
-            <label>⏱️ Опрос:</label>
-            <select [(ngModel)]="selectedIntervalType" (change)="onIntervalChange()">
-              <option value="1s">1 сек</option>
-              <option value="5s">5 сек (по умолч.)</option>
-              <option value="1m">1 мин</option>
-              <option value="5m">5 мин</option>
-              <option value="10m">10 мин</option>
-              <option value="custom">Свой интервал</option>
+      @if (!isTopBarHidden) {
+        <div class="top-bar">
+          <div class="selector-group">
+            <label>🌐 Сегмент сети (Дашборд):</label>
+            <select [(ngModel)]="activeDashId" (change)="onDashChange()" style="min-width: 250px;">
+              @for (d of dashboards; track d.id) {
+                <option [value]="d.id">🗺️ {{ d.name }}</option>
+              }
             </select>
-            @if (selectedIntervalType === 'custom') {
-              <div class="custom-sec-wrap">
-                <input type="number" min="1" [(ngModel)]="customIntervalSec" (change)="onIntervalChange()" style="width: 50px;" />
-                <span>сек</span>
-              </div>
+            <button class="btn icon-btn" (click)="createNewDash()" title="Создать новый план">+</button>
+            @if (activeDashId) {
+              <button class="btn icon-btn danger-text" (click)="deleteCurrentDash()" title="Удалить текущий дашборд">🗑️</button>
             }
-            <button class="btn icon-btn refresh-btn" [class.spinning]="isRefreshing" (click)="manualRefresh()" title="Обновить статусы прямо сейчас">🔄</button>
           </div>
 
-          <div class="divider"></div>
+          <div class="actions-group">
+            <div class="timer-controls">
+              <label>⏱️ Опрос:</label>
+              <select [(ngModel)]="selectedIntervalType" (change)="onIntervalChange()">
+                <option value="1s">1 сек</option>
+                <option value="5s">5 сек (по умолч.)</option>
+                <option value="1m">1 мин</option>
+                <option value="5m">5 мин</option>
+                <option value="10m">10 мин</option>
+                <option value="custom">Свой интервал</option>
+              </select>
+              @if (selectedIntervalType === 'custom') {
+                <div class="custom-sec-wrap">
+                  <input type="number" min="1" [(ngModel)]="customIntervalSec" (change)="onIntervalChange()" style="width: 50px;" />
+                  <span>сек</span>
+                </div>
+              }
+              <button class="btn icon-btn refresh-btn" [class.spinning]="isRefreshing" (click)="manualRefresh()" title="Обновить статусы прямо сейчас">🔄</button>
+            </div>
 
-          <label class="btn outline file-upload">
-            🖼️ Добавить картинку/план
-            <input type="file" accept="image/*" (change)="onImageUpload($event)" hidden />
-          </label>
+            <div class="divider"></div>
 
-          <div class="divider"></div>
+            <label class="btn outline file-upload">
+              🖼️ Добавить картинку/план
+              <input type="file" accept="image/*" (change)="onImageUpload($event)" hidden />
+            </label>
 
-          <button class="btn green" (click)="openDeviceModal()">+ Добавить устройство</button>
-          <button class="btn purple" (click)="openLinkModal()">🔗 Соединить</button>
-          <button class="btn outline" (click)="resetLayout()" title="Авто-расстановка незакрепленных узлов">🔄</button>
+            <div class="divider"></div>
+
+            <button class="btn green" (click)="openDeviceModal()">+ Добавить устройство</button>
+            <button class="btn purple" (click)="openLinkModal()">🔗 Соединить</button>
+            <button class="btn outline" (click)="resetLayout()" title="Авто-расстановка">🔄</button>
+
+            <div class="divider"></div>
+
+            <!-- КНОПКА СКРЫТИЯ ПАНЕЛИ -->
+            <button class="btn outline" (click)="toggleTopBar()" title="Скрыть панель управления">
+              ▲ Скрыть панель
+            </button>
+          </div>
         </div>
-      </div>
+      }
 
       <!-- МОДАЛКИ -->
       @if (showDeviceModal) {
@@ -127,9 +136,17 @@ import cytoscape, { Core } from 'cytoscape';
       <div class="graph-layout">
         <div class="canvas-box">
           <div class="legend">
+            <!-- КНОПКА ВОЗВРАТА ПАНЕЛИ КОГДА ОНА СКРЫТА -->
+            @if (isTopBarHidden) {
+              <button class="btn-show-panel" (click)="toggleTopBar()" title="Развернуть панель инструментов">
+                ▼ Показать меню
+              </button>
+              <div style="width: 1px; height: 16px; background: #cbd5e1; margin: 0 4px;"></div>
+            }
+
             <span class="pulse-dot green"></span> В сети 
             <span class="pulse-dot yellow"></span> Нет IP 
-            <span class="pulse-dot red"></span> Ошибка 
+            <span class="pulse-dot red"></span> Ошибка  
             <span class="hint" style="margin-left:auto;">
               ⏱️ Опрос: <b>{{ selectedIntervalType === 'custom' ? customIntervalSec + ' сек.' : selectedIntervalType }}</b> | Правый клик — скрыть связи
             </span>
@@ -302,6 +319,24 @@ import cytoscape, { Core } from 'cytoscape';
     .custom-sec-wrap input { padding: 3px 5px; border: 1px solid #cbd5e1; border-radius: 4px; font-size: 12px; }
     .refresh-btn { padding: 4px 8px; font-size: 13px; cursor: pointer; }
     .refresh-btn.spinning { animation: spin 0.6s linear infinite; }
+
+    .btn-show-panel {
+      background: #2563eb;
+      color: white;
+      border: none;
+      padding: 4px 10px;
+      border-radius: 4px;
+      font-size: 11px;
+      font-weight: bold;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      transition: background 0.2s;
+    }
+    .btn-show-panel:hover {
+      background: #1d4ed8;
+    }
   `]
 })
 export class NetworkTopologyComponent implements OnInit, OnDestroy {
@@ -320,6 +355,18 @@ export class NetworkTopologyComponent implements OnInit, OnDestroy {
   isRefreshing = false;
 
   dashboards: NetworkDashboard[] = [];
+
+  // Скрытие верхней панели
+  isTopBarHidden = false;
+
+  toggleTopBar() {
+    this.isTopBarHidden = !this.isTopBarHidden;
+    this.cdr.detectChanges();
+    setTimeout(() => {
+      this.cyInstance?.resize(); // Пересчитываем размер холста
+    }, 50);
+  }
+
   devices: NetworkDevice[] = [];
   links: NetworkLink[] = [];
 
@@ -443,7 +490,7 @@ export class NetworkTopologyComponent implements OnInit, OnDestroy {
       const img = new Image();
       img.onload = () => {
         const canvas = document.createElement('canvas');
-        const MAX_WIDTH = 1400; // Оптимальный размер
+        const MAX_WIDTH = 1200; // Оптимальный размер
         let width = img.width;
         let height = img.height;
 
@@ -456,16 +503,15 @@ export class NetworkTopologyComponent implements OnInit, OnDestroy {
         const ctx = canvas.getContext('2d');
         ctx?.drawImage(img, 0, 0, width, height);
 
-        const compressedBase64 = canvas.toDataURL('image/jpeg', 0.55);
+        const compressedBase64 = canvas.toDataURL('image/jpeg', 0.5);
 
         const dash = this.dashboards.find(d => d.id === this.activeDashId);
         if (dash) {
           if (!dash.images) dash.images = [];
           
-          // Сдвигаем новую картинку в сторону от существующих, чтобы они не накладывались
           const count = dash.images.length;
-          const newX = count > 0 ? (dash.images[count - 1].x + 350) : 0;
-          const newY = count > 0 ? (dash.images[count - 1].y + 50) : 0;
+          const newX = count > 0 ? (dash.images[count - 1].x + 400) : 0;
+          const newY = count > 0 ? dash.images[count - 1].y : 0;
 
           dash.images.push({
             id: 'img_' + Date.now(),
@@ -479,7 +525,13 @@ export class NetworkTopologyComponent implements OnInit, OnDestroy {
             locked: false
           });
 
-          this.api.updateNetworkDashboard(dash.id, { images: dash.images }).subscribe({
+          const updatePayload: any = { images: dash.images };
+          if (dash.bgImage) {
+            updatePayload.bgImage = '';
+            dash.bgImage = '';
+          }
+
+          this.api.updateNetworkDashboard(dash.id, updatePayload).subscribe({
             next: () => {
               this.renderGraph();
             },
@@ -490,7 +542,7 @@ export class NetworkTopologyComponent implements OnInit, OnDestroy {
       img.src = e.target.result;
     };
     reader.readAsDataURL(file);
-    event.target.value = ''; // СБРОС ИНПУТА ДЛЯ ВОЗМОЖНОСТИ ПОВТОРНОЙ ЗАГРУЗКИ
+    event.target.value = '';
   }
 
   saveImagesToDb() {
@@ -566,7 +618,6 @@ export class NetworkTopologyComponent implements OnInit, OnDestroy {
     if (dash && dash.images) {
       dash.images = dash.images.filter(i => i.id !== this.selectedImage!.id);
       
-      // Открепляем устройства от удаленного плана
       this.dashDevices.filter(d => d.attachedImageId === this.selectedImage!.id).forEach(d => {
         d.attachedImageId = '';
         this.api.updateNetworkDevice(d.id, { attachedImageId: '' }).subscribe();
@@ -840,7 +891,6 @@ export class NetworkTopologyComponent implements OnInit, OnDestroy {
           outNodes.removeClass('hidden');
 
           outNodes.forEach((child: any) => {
-            // Если дочернее устройство само НЕ свернуто — продолжаем раскрывать цепочку дальше
             if (!child.hasClass('collapsed')) {
               revealBranch(child);
             }
@@ -849,7 +899,7 @@ export class NetworkTopologyComponent implements OnInit, OnDestroy {
 
         revealBranch(node);
       } else {
-        // СВОРАЧИВАЕМ: скрываем ВСЮ цепочку на любую глубину (ПК, принтеры, свитчи и т.д.)
+        // СВОРАЧИВАЕМ: скрываем ВСЮ цепочку на любую глубину
         node.addClass('collapsed');
         node.successors('node[!isImage], edge').addClass('hidden');
       }
