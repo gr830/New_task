@@ -10,5 +10,6 @@ export const routes: Routes = [
   { path: 'login', component: LoginComponent },
   { path: 'dashboard', component: DashboardComponent, canActivate: [authGuard] },
   { path: 'computers', component: ComputersComponent, canActivate: [authGuard] },
-  { path: 'catalogs', component: CatalogsComponent, canActivate: [authGuard] }
+  { path: 'catalogs', component: CatalogsComponent, canActivate: [authGuard] },
+  { path: 'network', loadComponent: () => import('./features/network-topology/network-topology.component').then(m => m.NetworkTopologyComponent), canActivate: [authGuard] },
 ];

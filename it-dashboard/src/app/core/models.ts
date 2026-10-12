@@ -27,7 +27,7 @@ export interface InstalledSoftware {
   softwareCatalogId: string;
   version: string;
   licenseKey: string;
-  expiryDate: string; // Формат ГГГГ-ММ-ДД
+  expiryDate: string;
 }
 
 export interface SoftwareLink {
@@ -38,7 +38,6 @@ export interface SoftwareLink {
   description: string;
 }
 
-// Автоматический расчет статуса лицензии от текущей даты
 export function calculateLicenseStatus(expiryDate: string): {
   status: 'active' | 'warning' | 'danger';
   label: string;
@@ -59,4 +58,32 @@ export function calculateLicenseStatus(expiryDate: string): {
   } else {
     return { status: 'active', label: `Активно (${diffDays} дн.)`, daysLeft: diffDays };
   }
+}
+
+// --- СЕТЕВАЯ ТОПОЛОГИЯ ---
+export interface NetworkDashboard {
+  id: string;
+  name: string;
+  bgImage: string;
+}
+
+export type NetworkDeviceType = 'Микротик' | 'Свитч' | 'Сервер' | 'Вайфай' | 'Принтер' | 'Компьютер' | 'Тонкий клиент' | 'Ноутбук' | 'Телефон' | 'Станок ЧПУ' | 'Камера' | 'Другой';
+
+export interface NetworkDevice {
+  id: string;
+  dashboardId: string;
+  name: string;
+  type: NetworkDeviceType;
+  customIcon?: string;
+  ip: string;
+  pollingMethod: 'ICMP_PING' | 'SNMP' | 'TCP_PORT' | 'HTTP_API';
+  status: 'online' | 'offline' | 'warning';
+}
+
+export interface NetworkLink {
+  id: string;
+  sourceId: string;
+  targetId: string;
+  type: string;
+  description?: string; 
 }

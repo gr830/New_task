@@ -16,11 +16,12 @@ import { AuthService } from './core/auth.service';
             <span class="sub">Корпоративный учет оборудования и связей</span>
           </div>
         </div>
-        <nav class="nav-links">
-          <a routerLink="/dashboard" routerLinkActive="active">🖥️ Дашборд ПК</a>
-          <a routerLink="/computers" routerLinkActive="active">💻 Компьютеры и ПО</a>
-          <a routerLink="/catalogs" routerLinkActive="active">📚 Справочники</a>
-        </nav>
+       <nav class="nav-links">
+        <a routerLink="/dashboard" routerLinkActive="active">🖥️ ПО ПК</a>
+        <a routerLink="/network" routerLinkActive="active" style="color: #2dd4bf;">🌐 Сеть (NMS)</a>
+        <a routerLink="/computers" routerLinkActive="active">💻 База Оборудования</a>
+        <a routerLink="/catalogs" routerLinkActive="active">📚 Справочники</a>
+      </nav>
         <div class="user-block">
           <span>👨‍💻 {{ auth.currentUser() }}</span>
           <button class="logout-btn" (click)="auth.logout()">Выйти</button>
