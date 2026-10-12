@@ -187,10 +187,20 @@
       "dashboardId": "ndash_1",
       "id": "wKz0wKj0i7Q",
       "status": "warning",
-      "x": -3041.197638467847,
-      "y": -648.657838139664,
+      "x": -3386.049348201959,
+      "y": -635.4633015028113,
       "locked": false,
       "attachedImageId": ""
+    },
+    {
+      "type": "Принтер",
+      "pollingMethod": "ICMP_PING",
+      "name": "hp",
+      "dashboardId": "ndash_1",
+      "id": "qKAbN_QkB48",
+      "status": "warning",
+      "x": -3593.93445537901,
+      "y": -564.2032313124627
     }
   ],
   "network_links": [
@@ -218,6 +228,13 @@
       "type": "ПОРТ 12",
       "description": "ВПВАПАВПП",
       "id": "CANuoY61xc8"
+    },
+    {
+      "sourceId": "wKz0wKj0i7Q",
+      "targetId": "qKAbN_QkB48",
+      "type": "1433",
+      "description": "",
+      "id": "kTCgh9ESkeY"
     }
   ],
   "network_settings": [

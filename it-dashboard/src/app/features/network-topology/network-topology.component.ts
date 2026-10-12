@@ -819,10 +819,40 @@ export class NetworkTopologyComponent implements OnInit, OnDestroy {
     // Отдельное перемещение конкретного оборудования
     this.cyInstance.on('dragfree', 'node[!isImage]', evt => this.updateNodePositionInDb(evt.target));
 
+    // ПРАВЫЙ КЛИК ПО ОБОРУДОВАНИЮ: СВЕРНУТЬ / РАЗВЕРНУТЬ ВСЮ ЦЕПОЧКУ (ВЕТКУ)
     this.cyInstance.on('cxttap', 'node[!isImage]', evt => {
       const node = evt.target;
-      node.hasClass('collapsed') ? (node.removeClass('collapsed'), node.outgoers().removeClass('hidden')) 
-                                 : (node.addClass('collapsed'), node.outgoers().addClass('hidden'));
+      const isCollapsed = node.hasClass('collapsed');
+
+      if (isCollapsed) {
+        // РАЗВОРАЧИВАЕМ: восстанавливаем всю нисходящую ветку
+        node.removeClass('collapsed');
+        const visited = new Set<string>();
+
+        const revealBranch = (curr: any) => {
+          if (visited.has(curr.id())) return;
+          visited.add(curr.id());
+
+          const outEdges = curr.outgoers('edge');
+          const outNodes = curr.outgoers('node[!isImage]');
+
+          outEdges.removeClass('hidden');
+          outNodes.removeClass('hidden');
+
+          outNodes.forEach((child: any) => {
+            // Если дочернее устройство само НЕ свернуто — продолжаем раскрывать цепочку дальше
+            if (!child.hasClass('collapsed')) {
+              revealBranch(child);
+            }
+          });
+        };
+
+        revealBranch(node);
+      } else {
+        // СВОРАЧИВАЕМ: скрываем ВСЮ цепочку на любую глубину (ПК, принтеры, свитчи и т.д.)
+        node.addClass('collapsed');
+        node.successors('node[!isImage], edge').addClass('hidden');
+      }
     });
 
     this.cyInstance.on('tap', 'node', evt => {
