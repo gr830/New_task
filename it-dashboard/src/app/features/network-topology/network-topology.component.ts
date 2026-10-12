@@ -2,7 +2,7 @@ import { Component, ElementRef, OnInit, ViewChild, inject, NgZone, ChangeDetecto
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { ApiService } from '../../core/api.service';
-import { NetworkDashboard, NetworkDevice, NetworkLink, NetworkDeviceType } from '../../core/models';
+import { NetworkDashboard, NetworkDevice, NetworkLink, NetworkDeviceType, DashboardImage } from '../../core/models';
 import cytoscape, { Core } from 'cytoscape';
 
 @Component({
@@ -11,7 +11,6 @@ import cytoscape, { Core } from 'cytoscape';
   imports: [CommonModule, FormsModule],
   template: `
     <div class="dash-page">
-      <!-- ВЕРХНЯЯ ПАНЕЛЬ -->
       <div class="top-bar">
         <div class="selector-group">
           <label>🌐 Сегмент сети (Дашборд):</label>
@@ -27,7 +26,6 @@ import cytoscape, { Core } from 'cytoscape';
         </div>
 
         <div class="actions-group">
-          <!-- ВЫБОР ИНТЕРВАЛА И КНОПКА ОБНОВИТЬ ВРУЧНУЮ -->
           <div class="timer-controls">
             <label>⏱️ Опрос:</label>
             <select [(ngModel)]="selectedIntervalType" (change)="onIntervalChange()">
@@ -38,72 +36,52 @@ import cytoscape, { Core } from 'cytoscape';
               <option value="10m">10 мин</option>
               <option value="custom">Свой интервал</option>
             </select>
-
             @if (selectedIntervalType === 'custom') {
               <div class="custom-sec-wrap">
                 <input type="number" min="1" [(ngModel)]="customIntervalSec" (change)="onIntervalChange()" style="width: 50px;" />
                 <span>сек</span>
               </div>
             }
-
-            <button class="btn icon-btn refresh-btn" [class.spinning]="isRefreshing" (click)="manualRefresh()" title="Обновить статусы прямо сейчас">
-              🔄
-            </button>
+            <button class="btn icon-btn refresh-btn" [class.spinning]="isRefreshing" (click)="manualRefresh()" title="Обновить статусы прямо сейчас">🔄</button>
           </div>
 
           <div class="divider"></div>
 
-          <!-- Загрузка с компрессией -->
           <label class="btn outline file-upload">
-            🖼️ Загрузить фон (Авто-сжатие)
-            <input type="file" accept="image/*" (change)="onBgUpload($event)" hidden />
+            🖼️ Добавить картинку/план
+            <input type="file" accept="image/*" (change)="onImageUpload($event)" hidden />
           </label>
-          @if (activeDashBg) {
-            <button class="btn outline danger" (click)="clearBg()">✕ Убрать фон</button>
-          }
 
           <div class="divider"></div>
 
           <button class="btn green" (click)="openDeviceModal()">+ Добавить устройство</button>
           <button class="btn purple" (click)="openLinkModal()">🔗 Соединить</button>
-          <button class="btn outline" (click)="resetLayout()" title="Сбросить сохраненные координаты">🔄</button>
+          <button class="btn outline" (click)="resetLayout()" title="Авто-расстановка незакрепленных узлов">🔄</button>
         </div>
       </div>
 
-      <!-- МОДАЛКА: СОЗДАНИЕ / РЕДАКТИРОВАНИЕ УСТРОЙСТВА -->
+      <!-- МОДАЛКИ -->
       @if (showDeviceModal) {
         <div class="modal-backdrop">
           <div class="modal">
             <h3>{{ editingDevice ? '✏️ Редактирование устройства' : '🖥️ Добавление оборудования' }}</h3>
-            
             <div class="form-group">
               <label>Тип оборудования:</label>
               <select [(ngModel)]="newDevice.type">
                 @for (t of deviceTypes; track t) { <option [value]="t">{{ getIconForType(t) }} {{ t }}</option> }
               </select>
             </div>
-
+            <div class="form-group"><label>Сетевое имя / Hostname:</label><input [(ngModel)]="newDevice.name" placeholder="Core-SW-01..." /></div>
+            <div class="form-group"><label>IP / MAC Адрес:</label><input [(ngModel)]="newDevice.ip" placeholder="10.0.0.1" /></div>
             <div class="form-group">
-              <label>Сетевое имя / Hostname:</label>
-              <input [(ngModel)]="newDevice.name" placeholder="Core-SW-01..." />
-            </div>
-
-            <div class="form-group">
-              <label>IP / MAC Адрес:</label>
-              <input [(ngModel)]="newDevice.ip" placeholder="10.0.0.1" />
-            </div>
-
-            <div class="form-group">
-              <label>Способ мониторинга (Polling):</label>
+              <label>Способ мониторинга:</label>
               <div class="radio-group">
                 <label><input type="radio" [(ngModel)]="newDevice.pollingMethod" value="ICMP_PING"> ICMP Ping</label>
                 <label><input type="radio" [(ngModel)]="newDevice.pollingMethod" value="SNMP"> SNMP v2/v3</label>
                 <label><input type="radio" [(ngModel)]="newDevice.pollingMethod" value="TCP_PORT"> TCP Port Scan</label>
                 <label><input type="radio" [(ngModel)]="newDevice.pollingMethod" value="HTTP_API"> HTTP API</label>
               </div>
-              <a href="javascript:void(0)" class="info-link" (click)="showPollingInfo = true">Как это работает? (Подробнее)</a>
             </div>
-
             <div class="modal-actions">
               <button class="btn gray" (click)="showDeviceModal = false">Отмена</button>
               <button class="btn blue" (click)="onSaveDevice()">Сохранить</button>
@@ -112,28 +90,6 @@ import cytoscape, { Core } from 'cytoscape';
         </div>
       }
 
-      <!-- МОДАЛКА: ИНФО О МОНИТОРИНГЕ -->
-      @if (showPollingInfo) {
-        <div class="modal-backdrop" style="z-index: 2000;">
-          <div class="modal">
-            <h3>ℹ️ Реальный мониторинг сети (Enterprise Poller Service)</h3>
-            <p style="font-size: 13px; color: #475569; line-height: 1.6;">
-              Мониторинг выполняется реальным серверным сервисом <b>poller.js</b> в фоновом режиме:<br><br>
-              <b>🟢 ICMP Ping:</b> Реальная отправка ICMP echo-пакетов через сетевой стек ОС. Проверяет физическую доступность хоста.<br>
-              <b>🔌 TCP Port Scan:</b> Реальная проверка доступности порта через прямое сокет-соединение (например: <code>192.168.250.139:8291</code> для WinBox, <code>:1433</code> для SQL, <code>:80</code> для Web).<br>
-              <b>🌐 HTTP API:</b> Выполнение реальных GET-запросов к веб-сервисам с проверкой кодов ответа HTTP 200.<br>
-              <b>📡 SNMP:</b> Базовая диагностика сетевых интерфейсов управляемых коммутаторов и маршрутизаторов.<br><br>
-              <b>Цветовая индикация:</b><br>
-              • 🟢 <b>Зеленый:</b> Оборудование отвечает на запросы и активно в сети.<br>
-              • 🟡 <b>Желтый:</b> Оборудование добавлено на план, но IP-адрес не указан (требуется настройка).<br>
-              • 🔴 <b>Красный:</b> Оборудование недоступно (таймаут пинга или закрыт порт).
-            </p>
-            <div class="modal-actions"><button class="btn blue" (click)="showPollingInfo = false">Понятно</button></div>
-          </div>
-        </div>
-      }
-
-      <!-- МОДАЛКА: СОЗДАНИЕ СВЯЗИ -->
       @if (showLinkModal) {
         <div class="modal-backdrop">
           <div class="modal wide-modal">
@@ -145,12 +101,8 @@ import cytoscape, { Core } from 'cytoscape';
                   <option value="" disabled>Выберите устройство...</option>
                   @for (d of dashDevices; track d.id) { <option [value]="d.id">{{ d.name }} ({{ d.ip }})</option> }
                 </select>
-                
-                <label style="margin-top:10px;">Тип кабеля / Протокол:</label>
-                <input [(ngModel)]="linkType" placeholder="Trunk, Access, SFP 10G..." />
-                
-                <label style="margin-top:10px;">Описание связи:</label>
-                <textarea [(ngModel)]="linkDescription" rows="2" placeholder="Назначение линка..."></textarea>
+                <label style="margin-top:10px;">Тип кабеля / Протокол:</label><input [(ngModel)]="linkType" placeholder="Trunk, Access, SFP 10G..." />
+                <label style="margin-top:10px;">Описание связи:</label><textarea [(ngModel)]="linkDescription" rows="2"></textarea>
               </div>
               <div class="target-column">
                 <label>КУДА (Downlinks - отметьте галочками):</label>
@@ -172,69 +124,110 @@ import cytoscape, { Core } from 'cytoscape';
         </div>
       }
 
-      <!-- ХОЛСТ ГРАФА И ФОН -->
       <div class="graph-layout">
         <div class="canvas-box">
-          <div class="bg-layer" [style.background-image]="activeDashBg ? 'url(' + activeDashBg + ')' : 'none'" #bgLayer></div>
-          
           <div class="legend">
-            <span class="pulse-dot green"></span> В сети (Online)
-            <span class="pulse-dot yellow"></span> Не настроен (Нет IP)
-            <span class="pulse-dot red"></span> Ошибка (Offline)
+            <span class="pulse-dot green"></span> В сети 
+            <span class="pulse-dot yellow"></span> Нет IP 
+            <span class="pulse-dot red"></span> Ошибка 
             <span class="hint" style="margin-left:auto;">
-              ⏱️ Авто-опрос: <b>{{ selectedIntervalType === 'custom' ? customIntervalSec + ' сек.' : selectedIntervalType }}</b> | 
-              <b>Правый клик</b> по узлу — скрыть/раскрыть связи.
+              ⏱️ Опрос: <b>{{ selectedIntervalType === 'custom' ? customIntervalSec + ' сек.' : selectedIntervalType }}</b> | Правый клик — скрыть связи
             </span>
           </div>
-
           <div class="cy-container" #cy></div>
         </div>
 
-        <!-- КАРТОЧКА ОБОРУДОВАНИЯ (УЗЕЛ) -->
+        <!-- КАРТОЧКА ОБОРУДОВАНИЯ -->
         @if (selectedType === 'node' && selectedDevice) {
           <aside class="side-panel">
             <div class="panel-head">
               <h4>{{ getIconForType(selectedDevice.type) }} {{ selectedDevice.name }}</h4>
               <button (click)="closeSidePanel()">✕</button>
             </div>
-            
             <div class="status-banner" [ngClass]="selectedDevice.status">
-              {{ 
-                selectedDevice.status === 'online' ? '🟢 ONLINE (Отвечает)' : 
-                selectedDevice.status === 'warning' ? '🟡 ВНИМАНИЕ (Не указан IP)' : 
-                '🔴 OFFLINE (Нет ответа)' 
-              }}
+              {{ selectedDevice.status === 'online' ? '🟢 ONLINE' : selectedDevice.status === 'warning' ? '🟡 НЕТ IP' : '🔴 OFFLINE' }}
             </div>
-
             <div class="meta-row"><label>Тип:</label> <b>{{ selectedDevice.type }}</b></div>
             <div class="meta-row"><label>IP Адрес:</label> <code>{{ selectedDevice.ip }}</code></div>
-            <div class="meta-row"><label>Метод опроса:</label> <b>{{ selectedDevice.pollingMethod }}</b></div>
+            <div class="meta-row"><label>Опрос:</label> <b>{{ selectedDevice.pollingMethod }}</b></div>
+            
+            <!-- ПРИВЯЗКА К ПЛАНУ (КАРТИНКЕ) -->
+            <div class="meta-row" style="margin-top: 15px; padding: 10px; background: #eff6ff; border-radius: 6px; border: 1px solid #bfdbfe;">
+              <label style="color: #1e40af; font-weight: bold; margin-bottom: 5px;">📎 Привязать к плану (картинке):</label>
+              <select [(ngModel)]="selectedDevice.attachedImageId" (change)="onDeviceAttachmentChange()" style="width: 100%; padding: 6px; border-radius: 4px; border: 1px solid #93c5fd; background: #fff;">
+                <option value="">❌ Без привязки</option>
+                @for (img of currentDashImages; track img.id; let idx = $index) {
+                  <option [value]="img.id">🖼️ {{ img.name || 'План #' + (idx + 1) }}</option>
+                }
+              </select>
+              <small style="color: #64748b; font-size: 11px; display:block; margin-top: 4px;">
+                При перемещении этого плана оборудование будет двигаться вместе с ним!
+              </small>
+            </div>
 
-            <div class="panel-actions" style="margin-top: 20px;">
+            <!-- БЛОКИРОВКА ОТ СЛУЧАЙНОГО СДВИГА -->
+            <div class="meta-row" style="margin-top: 10px; padding: 10px; background: #f8fafc; border-radius: 6px;">
+              <label style="cursor:pointer; display:flex; align-items:center; gap:8px;">
+                <input type="checkbox" [checked]="selectedDevice.locked" (change)="toggleDeviceLock()">
+                <b>🔒 Закрепить на месте</b>
+              </label>
+              <small style="color:#94a3b8; font-size:10px;">Запрещает ручной сдвиг оборудования.</small>
+            </div>
+
+            <div class="panel-actions" style="margin-top: 15px;">
               <button class="btn blue full-width" (click)="openEditDevice(selectedDevice)" style="margin-bottom: 8px;">✏️ Редактировать</button>
               <button class="btn outline danger full-width" (click)="onDeleteDevice(selectedDevice.id)">🗑️ Удалить</button>
             </div>
           </aside>
         }
 
-        <!-- КАРТОЧКА СВЯЗИ (ЛИНИЯ) -->
-        @if (selectedType === 'edge' && selectedEdgeData) {
+        <!-- КАРТОЧКА ИЗОБРАЖЕНИЯ (ПЛАНА) -->
+        @if (selectedType === 'image' && selectedImage) {
           <aside class="side-panel">
             <div class="panel-head">
-              <h4>🔗 Свойства линка</h4>
+              <h4>🖼️ {{ selectedImage.name || 'Фоновый план' }}</h4>
               <button (click)="closeSidePanel()">✕</button>
             </div>
-
-            <div class="form-group" style="margin-top: 14px;">
-              <label>Тип соединения / Порт:</label>
-              <input [(ngModel)]="editLinkType" />
+            
+            <div class="form-group" style="margin-top: 10px;">
+              <label>Название плана:</label>
+              <input [(ngModel)]="selectedImage.name" (change)="saveImagesToDb()" placeholder="Например: Кабинет 101" />
             </div>
 
             <div class="form-group">
-              <label>Описание:</label>
-              <textarea [(ngModel)]="editLinkDesc" rows="3"></textarea>
+              <label>Масштаб плана (размер):</label>
+              <input type="range" min="0.2" max="3" step="0.05" [(ngModel)]="selectedImage.scale" (input)="onImageScaleChange()" />
             </div>
 
+            <div class="meta-row" style="padding: 10px; background: #f0fdf4; border-radius: 6px; border: 1px solid #bbf7d0;">
+              <span style="font-size: 12px; color: #166534; font-weight: bold;">
+                📌 Закреплено оборудования: {{ getAttachedDevicesCount(selectedImage.id) }} шт.
+              </span>
+              <small style="color: #64748b; font-size: 11px; display:block; margin-top: 3px;">
+                Потяните этот план мышкой, и всё закрепленное за ним оборудование сместится вместе с ним.
+              </small>
+            </div>
+
+            <div class="meta-row" style="margin-top: 10px; padding: 10px; background: #f8fafc; border-radius: 6px;">
+              <label style="cursor:pointer; display:flex; align-items:center; gap:8px;">
+                <input type="checkbox" [checked]="selectedImage.locked" (change)="toggleImageLock()">
+                <b>🔒 Зафиксировать план</b>
+              </label>
+              <small style="color:#94a3b8; font-size:10px;">Защищает план от случайного перемещения.</small>
+            </div>
+
+            <div class="panel-actions" style="margin-top: 15px;">
+              <button class="btn outline danger full-width" (click)="onDeleteImage()">🗑️ Удалить план</button>
+            </div>
+          </aside>
+        }
+
+        <!-- КАРТОЧКА СВЯЗИ -->
+        @if (selectedType === 'edge' && selectedEdgeData) {
+          <aside class="side-panel">
+            <div class="panel-head"><h4>🔗 Свойства линка</h4><button (click)="closeSidePanel()">✕</button></div>
+            <div class="form-group" style="margin-top: 14px;"><label>Тип соединения / Порт:</label><input [(ngModel)]="editLinkType" /></div>
+            <div class="form-group"><label>Описание:</label><textarea [(ngModel)]="editLinkDesc" rows="3"></textarea></div>
             <div class="panel-actions" style="margin-top: 20px;">
               <button class="btn blue full-width" (click)="onUpdateLink()" style="margin-bottom: 8px;">💾 Сохранить изменения</button>
               <button class="btn outline danger full-width" (click)="onDeleteLink(selectedEdgeData.id)">🗑️ Удалить линк</button>
@@ -256,7 +249,6 @@ import cytoscape, { Core } from 'cytoscape';
     .btn { padding: 8px 14px; border-radius: 6px; font-weight: bold; font-size: 13px; border: none; cursor: pointer; transition: 0.2s; white-space: nowrap; }
     .btn.icon-btn { padding: 8px 12px; font-size: 16px; background: #e2e8f0; }
     .danger-text { color: #ef4444; }
-    .danger-text:hover { background: #fee2e2; }
     .btn.purple { background: #7c3aed; color: white; }
     .btn.green { background: #10b981; color: white; }
     .btn.blue { background: #2563eb; color: white; }
@@ -266,19 +258,13 @@ import cytoscape, { Core } from 'cytoscape';
     .file-upload { cursor: pointer; display: inline-flex; align-items: center; margin: 0; }
 
     .graph-layout { flex: 1; display: flex; gap: 14px; min-height: 0; }
-    
     .canvas-box { flex: 1; min-width: 0; display: flex; flex-direction: column; background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px; position: relative; overflow: hidden; }
     .legend { display: flex; align-items: center; gap: 8px; padding: 8px 12px; background: rgba(255,255,255,0.9); z-index: 10; border-bottom: 1px solid #e2e8f0; font-size: 12px; }
     .cy-container { flex: 1; position: absolute; inset: 0; top: 35px; z-index: 2; }
     
-    .bg-layer {
-      position: absolute; top: 35px; left: 0; width: 100%; height: 100%; z-index: 1;
-      background-repeat: no-repeat; background-position: left top; background-size: contain;
-      transform-origin: 0 0; pointer-events: none; opacity: 0.85;
-    }
-
     .pulse-dot { width: 12px; height: 12px; border-radius: 50%; display: inline-block; box-shadow: 0 0 0 rgba(0,0,0, 0.4); animation: pulse 2s infinite; }
     .pulse-dot.green { background: #10b981; box-shadow: 0 0 0 rgba(16, 185, 129, 0.4); }
+    .pulse-dot.yellow { background: #f59e0b; box-shadow: 0 0 0 rgba(245, 158, 11, 0.4); }
     .pulse-dot.red { background: #ef4444; box-shadow: 0 0 0 rgba(239, 68, 68, 0.4); animation: pulse-fast 1s infinite; }
     @keyframes pulse { 0% { box-shadow: 0 0 0 0 rgba(16, 185, 129, 0.7); } 70% { box-shadow: 0 0 0 8px rgba(16, 185, 129, 0); } 100% { box-shadow: 0 0 0 0 rgba(16, 185, 129, 0); } }
     @keyframes pulse-fast { 0% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.7); } 70% { box-shadow: 0 0 0 10px rgba(239, 68, 68, 0); } 100% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0); } }
@@ -286,14 +272,10 @@ import cytoscape, { Core } from 'cytoscape';
     .side-panel { width: 320px; flex-shrink: 0; background: white; border: 1px solid #e2e8f0; border-radius: 8px; padding: 18px; overflow-y: auto; box-shadow: -2px 0 10px rgba(0,0,0,0.04); z-index: 5; }
     .panel-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; font-size: 16px; font-weight: bold; }
     .panel-head button { background: none; border: none; font-size: 18px; cursor: pointer; color: #94a3b8; }
-    
     .status-banner { padding: 10px; border-radius: 6px; font-weight: bold; text-align: center; margin-bottom: 16px; color: white; }
     .status-banner.online { background: #10b981; }
-    .status-banner.warning { background: #f59e0b; } /* Желтый баннер */
+    .status-banner.warning { background: #f59e0b; }
     .status-banner.offline { background: #ef4444; }
-
-    .pulse-dot.yellow { background: #f59e0b; box-shadow: 0 0 0 rgba(245, 158, 11, 0.4); } /* Желтая точка */
-    
     .meta-row { margin-bottom: 8px; font-size: 13px; }
     .meta-row label { color: #64748b; display: block; font-size: 11px; margin-bottom: 2px; }
     .meta-row code { background: #f1f5f9; padding: 2px 4px; border-radius: 4px; font-family: monospace; }
@@ -306,8 +288,6 @@ import cytoscape, { Core } from 'cytoscape';
     .form-group label { display: block; font-size: 12px; font-weight: bold; margin-bottom: 4px; color: #475569; }
     .form-group input, .form-group select, .form-group textarea { width: 100%; padding: 8px; border: 1px solid #cbd5e1; border-radius: 6px; box-sizing: border-box; font-family: inherit; }
     .radio-group { display: flex; flex-direction: column; gap: 6px; font-size: 13px; margin-bottom: 6px; }
-    .info-link { font-size: 11px; color: #2563eb; text-decoration: none; font-weight: 600; }
-    .info-link:hover { text-decoration: underline; }
     .modal-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 20px; }
     
     .bulk-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-top: 14px; }
@@ -320,14 +300,12 @@ import cytoscape, { Core } from 'cytoscape';
     .timer-controls select { padding: 4px 8px; border: 1px solid #cbd5e1; border-radius: 4px; font-size: 12px; background: white; cursor: pointer; }
     .custom-sec-wrap { display: flex; align-items: center; gap: 3px; font-size: 11px; color: #475569; }
     .custom-sec-wrap input { padding: 3px 5px; border: 1px solid #cbd5e1; border-radius: 4px; font-size: 12px; }
-    
     .refresh-btn { padding: 4px 8px; font-size: 13px; cursor: pointer; }
     .refresh-btn.spinning { animation: spin 0.6s linear infinite; }
   `]
 })
 export class NetworkTopologyComponent implements OnInit, OnDestroy {
   @ViewChild('cy', { static: false }) cyEl!: ElementRef;
-  @ViewChild('bgLayer', { static: false }) bgLayer!: ElementRef;
 
   private api = inject(ApiService);
   private zone = inject(NgZone);
@@ -336,7 +314,6 @@ export class NetworkTopologyComponent implements OnInit, OnDestroy {
   cyInstance: Core | null = null;
   pollingTimer: any;
   
-  // НАСТРОЙКИ ТАЙМЕРА ОБНОВЛЕНИЯ:
   refreshInterval = 5000;
   selectedIntervalType = '5s';
   customIntervalSec = 30;
@@ -347,40 +324,37 @@ export class NetworkTopologyComponent implements OnInit, OnDestroy {
   links: NetworkLink[] = [];
 
   activeDashId = '';
-  activeDashBg = '';
   dashDevices: NetworkDevice[] = [];
   dashLinks: NetworkLink[] = [];
 
-  // Модалка устройств
   showDeviceModal = false;
   editingDevice = false;
   deviceTypes: NetworkDeviceType[] = ['Микротик', 'Свитч', 'Сервер', 'Вайфай', 'Принтер', 'Компьютер', 'Тонкий клиент', 'Ноутбук', 'Телефон', 'Станок ЧПУ', 'Камера', 'Другой'];
   newDevice: Partial<NetworkDevice> = { type: 'Свитч', pollingMethod: 'ICMP_PING' };
-  showPollingInfo = false;
 
-  // Модалка связей (Добавление)
   showLinkModal = false;
   fromDevId = '';
   selectedTargetIds = new Set<string>();
   linkType = '';
   linkDescription = '';
 
-  // Правая панель
-  selectedType: 'node' | 'edge' | null = null;
+  selectedType: 'node' | 'edge' | 'image' | null = null;
   selectedDevice: NetworkDevice | null = null;
-  
+  selectedImage: DashboardImage | null = null;
   selectedEdgeData: any = null;
   editLinkType = '';
   editLinkDesc = '';
 
-  ngOnInit() {
-    this.loadData();
-    this.restartPollingTimer();
-  }
+  ngOnInit() { this.loadData(); }
 
   ngOnDestroy() {
     if (this.pollingTimer) clearInterval(this.pollingTimer);
     if (this.cyInstance) this.cyInstance.destroy();
+  }
+
+  get currentDashImages(): DashboardImage[] {
+    const dash = this.dashboards.find(d => d.id === this.activeDashId);
+    return dash?.images || [];
   }
 
   loadData() {
@@ -421,20 +395,14 @@ export class NetworkTopologyComponent implements OnInit, OnDestroy {
     return icons[type] || '📦';
   }
 
-  // Генерирует SVG для отображения иконки внутри квадрата:
   getIconSvg(type: NetworkDeviceType | string): string {
     const icon = this.getIconForType(type);
-    const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="46" height="46">
-      <text x="50%" y="58%" dominant-baseline="middle" text-anchor="middle" font-size="24">${icon}</text>
-    </svg>`;
+    const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="46" height="46"><text x="50%" y="58%" dominant-baseline="middle" text-anchor="middle" font-size="24">${icon}</text></svg>`;
     return `data:image/svg+xml;utf8,${encodeURIComponent(svg)}`;
   }
 
   onDashChange() {
     this.closeSidePanel();
-    const dash = this.dashboards.find(d => d.id === this.activeDashId);
-    this.activeDashBg = dash?.bgImage || '';
-    
     this.dashDevices = this.devices.filter(d => d.dashboardId === this.activeDashId);
     const devIds = new Set(this.dashDevices.map(d => d.id));
     this.dashLinks = this.links.filter(l => devIds.has(l.sourceId) && devIds.has(l.targetId));
@@ -444,9 +412,9 @@ export class NetworkTopologyComponent implements OnInit, OnDestroy {
   }
 
   createNewDash() {
-    const name = prompt('Введите название нового сегмента сети (например: Склад 2):');
+    const name = prompt('Введите название нового сегмента сети:');
     if (name) {
-      this.api.addNetworkDashboard({ name, bgImage: '' }).subscribe(res => {
+      this.api.addNetworkDashboard({ name }).subscribe(res => {
         this.dashboards.push(res);
         this.activeDashId = res.id;
         this.onDashChange();
@@ -456,7 +424,7 @@ export class NetworkTopologyComponent implements OnInit, OnDestroy {
 
   deleteCurrentDash() {
     if (!this.activeDashId) return;
-    if (confirm('Вы уверены, что хотите удалить весь дашборд? Устройства и связи останутся в БД, но исчезнут с плана.')) {
+    if (confirm('Удалить дашборд? Устройства останутся в базе.')) {
       this.api.deleteNetworkDashboard(this.activeDashId).subscribe(() => {
         this.dashboards = this.dashboards.filter(d => d.id !== this.activeDashId);
         this.activeDashId = this.dashboards.length > 0 ? this.dashboards[0].id : '';
@@ -465,18 +433,17 @@ export class NetworkTopologyComponent implements OnInit, OnDestroy {
     }
   }
 
-  // --- КОМПРЕССИЯ ФОНА ЧЕРЕЗ CANVAS ПЕРЕД ОТПРАВКОЙ НА СЕРВЕР ---
-  onBgUpload(event: any) {
-    const file = event.target.files[0];
+  // ЗАГРУЗКА МНОЖЕСТВА КАРТИНОК
+  onImageUpload(event: any) {
+    const file = event.target.files?.[0];
     if (!file || !this.activeDashId) return;
 
     const reader = new FileReader();
     reader.onload = (e: any) => {
       const img = new Image();
       img.onload = () => {
-        // Создаем Canvas для сжатия
         const canvas = document.createElement('canvas');
-        const MAX_WIDTH = 1920; // Максимальная ширина фона
+        const MAX_WIDTH = 1400; // Оптимальный размер
         let width = img.width;
         let height = img.height;
 
@@ -489,210 +456,227 @@ export class NetworkTopologyComponent implements OnInit, OnDestroy {
         const ctx = canvas.getContext('2d');
         ctx?.drawImage(img, 0, 0, width, height);
 
-        // Сжимаем в JPEG качества 50% (сильно режет вес для JSON сервера)
-        const compressedBase64 = canvas.toDataURL('image/jpeg', 0.5);
+        const compressedBase64 = canvas.toDataURL('image/jpeg', 0.55);
 
-        this.api.updateNetworkDashboard(this.activeDashId, { bgImage: compressedBase64 }).subscribe({
-          next: () => {
-            this.activeDashBg = compressedBase64;
-            const dash = this.dashboards.find(d => d.id === this.activeDashId);
-            if (dash) dash.bgImage = compressedBase64;
-            this.cdr.detectChanges();
-          },
-          error: (err) => alert('Ошибка сервера: Файл всё ещё слишком велик. Попробуйте сжать картинку перед загрузкой.')
-        });
+        const dash = this.dashboards.find(d => d.id === this.activeDashId);
+        if (dash) {
+          if (!dash.images) dash.images = [];
+          
+          // Сдвигаем новую картинку в сторону от существующих, чтобы они не накладывались
+          const count = dash.images.length;
+          const newX = count > 0 ? (dash.images[count - 1].x + 350) : 0;
+          const newY = count > 0 ? (dash.images[count - 1].y + 50) : 0;
+
+          dash.images.push({
+            id: 'img_' + Date.now(),
+            name: `План ${count + 1}`,
+            url: compressedBase64,
+            x: newX,
+            y: newY,
+            width: width,
+            height: height,
+            scale: 1,
+            locked: false
+          });
+
+          this.api.updateNetworkDashboard(dash.id, { images: dash.images }).subscribe({
+            next: () => {
+              this.renderGraph();
+            },
+            error: () => alert('Ошибка при сохранении: файл слишком большой для базы.')
+          });
+        }
       };
       img.src = e.target.result;
     };
     reader.readAsDataURL(file);
+    event.target.value = ''; // СБРОС ИНПУТА ДЛЯ ВОЗМОЖНОСТИ ПОВТОРНОЙ ЗАГРУЗКИ
   }
 
-  clearBg() {
-    this.api.updateNetworkDashboard(this.activeDashId, { bgImage: '' }).subscribe(() => {
-      this.activeDashBg = '';
+  saveImagesToDb() {
+    const dash = this.dashboards.find(d => d.id === this.activeDashId);
+    if (dash && dash.images) {
+      this.api.updateNetworkDashboard(dash.id, { images: dash.images }).subscribe();
+    }
+  }
+
+  updateNodePositionInDb(node: any) {
+    const id = node.id();
+    const pos = node.position();
+    
+    if (node.data('isImage')) {
       const dash = this.dashboards.find(d => d.id === this.activeDashId);
-      if (dash) dash.bgImage = '';
-      this.cdr.detectChanges();
-    });
+      if (dash && dash.images) {
+        const img = dash.images.find(i => i.id === id);
+        if (img) {
+          img.x = pos.x; img.y = pos.y;
+          this.saveImagesToDb();
+        }
+      }
+    } else {
+      const dev = this.dashDevices.find(d => d.id === id);
+      if (dev) {
+        dev.x = pos.x; dev.y = pos.y;
+        this.api.updateNetworkDevice(id, { x: pos.x, y: pos.y }).subscribe();
+      }
+    }
   }
 
-  // --- CRUD УСТРОЙСТВА ---
-  openDeviceModal() {
-    this.editingDevice = false;
-    this.newDevice = { type: 'Свитч', pollingMethod: 'ICMP_PING' };
-    this.showDeviceModal = true;
+  // ПРИВЯЗКА УСТРОЙСТВА К КАРТИНКЕ
+  onDeviceAttachmentChange() {
+    if (!this.selectedDevice) return;
+    this.api.updateNetworkDevice(this.selectedDevice.id, {
+      attachedImageId: this.selectedDevice.attachedImageId || ''
+    }).subscribe();
   }
 
-  openEditDevice(dev: NetworkDevice) {
-    this.editingDevice = true;
-    this.newDevice = { ...dev };
-    this.showDeviceModal = true;
+  getAttachedDevicesCount(imageId: string): number {
+    return this.dashDevices.filter(d => d.attachedImageId === imageId).length;
   }
 
+  toggleDeviceLock() {
+    if (!this.selectedDevice) return;
+    this.selectedDevice.locked = !this.selectedDevice.locked;
+    const node = this.cyInstance?.getElementById(this.selectedDevice.id);
+    if (node) this.selectedDevice.locked ? node.lock() : node.unlock();
+    this.api.updateNetworkDevice(this.selectedDevice.id, { locked: this.selectedDevice.locked }).subscribe();
+  }
+
+  toggleImageLock() {
+    if (!this.selectedImage) return;
+    this.selectedImage.locked = !this.selectedImage.locked;
+    const node = this.cyInstance?.getElementById(this.selectedImage.id);
+    if (node) this.selectedImage.locked ? node.lock() : node.unlock();
+    this.saveImagesToDb();
+  }
+
+  onImageScaleChange() {
+    if (!this.selectedImage || !this.cyInstance) return;
+    const node = this.cyInstance.getElementById(this.selectedImage.id);
+    if (node) {
+      node.data('width', (this.selectedImage.width * this.selectedImage.scale) + 'px');
+      node.data('height', (this.selectedImage.height * this.selectedImage.scale) + 'px');
+    }
+    this.saveImagesToDb();
+  }
+
+  onDeleteImage() {
+    if (!this.selectedImage || !confirm('Удалить этот план?')) return;
+    const dash = this.dashboards.find(d => d.id === this.activeDashId);
+    if (dash && dash.images) {
+      dash.images = dash.images.filter(i => i.id !== this.selectedImage!.id);
+      
+      // Открепляем устройства от удаленного плана
+      this.dashDevices.filter(d => d.attachedImageId === this.selectedImage!.id).forEach(d => {
+        d.attachedImageId = '';
+        this.api.updateNetworkDevice(d.id, { attachedImageId: '' }).subscribe();
+      });
+
+      this.api.updateNetworkDashboard(dash.id, { images: dash.images }).subscribe(() => {
+        this.closeSidePanel();
+        this.renderGraph();
+      });
+    }
+  }
+
+  resetLayout() {
+    if (this.cyInstance) {
+      this.cyInstance.layout({ name: 'cose', padding: 50 }).run();
+      this.cyInstance.nodes().forEach(node => {
+        if (!node.locked()) this.updateNodePositionInDb(node);
+      });
+    }
+  }
+
+  openDeviceModal() { this.editingDevice = false; this.newDevice = { type: 'Свитч', pollingMethod: 'ICMP_PING' }; this.showDeviceModal = true; }
+  openEditDevice(dev: NetworkDevice) { this.editingDevice = true; this.newDevice = { ...dev }; this.showDeviceModal = true; }
   onSaveDevice() {
     if (!this.newDevice.name) return;
-    
     if (this.editingDevice && this.newDevice.id) {
-      this.api.updateNetworkDevice(this.newDevice.id, this.newDevice).subscribe(() => {
-        this.showDeviceModal = false;
-        this.loadData();
-      });
+      this.api.updateNetworkDevice(this.newDevice.id, this.newDevice).subscribe(() => { this.showDeviceModal = false; this.loadData(); });
     } else {
       this.newDevice.dashboardId = this.activeDashId;
-      this.api.addNetworkDevice(this.newDevice).subscribe(() => {
-        this.showDeviceModal = false;
-        this.loadData();
-      });
+      this.api.addNetworkDevice(this.newDevice).subscribe(() => { this.showDeviceModal = false; this.loadData(); });
     }
   }
+  onDeleteDevice(id: string) { if (confirm('Удалить устройство?')) { this.api.deleteNetworkDevice(id).subscribe(() => { this.closeSidePanel(); this.loadData(); }); } }
 
-  onDeleteDevice(id: string) {
-    if (confirm('Удалить устройство с дашборда?')) {
-      this.api.deleteNetworkDevice(id).subscribe(() => this.loadData());
-    }
-  }
-
-  // --- CRUD СВЯЗИ ---
-  openLinkModal() {
-    this.fromDevId = '';
-    this.selectedTargetIds.clear();
-    this.linkType = '';
-    this.linkDescription = '';
-    this.showLinkModal = true;
-  }
-  
-  toggleTarget(id: string) {
-    if (this.selectedTargetIds.has(id)) this.selectedTargetIds.delete(id);
-    else this.selectedTargetIds.add(id);
-  }
-  
+  openLinkModal() { this.fromDevId = ''; this.selectedTargetIds.clear(); this.linkType = ''; this.linkDescription = ''; this.showLinkModal = true; }
+  toggleTarget(id: string) { this.selectedTargetIds.has(id) ? this.selectedTargetIds.delete(id) : this.selectedTargetIds.add(id); }
   onSaveLinks() {
     if (!this.fromDevId || this.selectedTargetIds.size === 0) return;
-    const toCreate = Array.from(this.selectedTargetIds).map(toId => ({
-      sourceId: this.fromDevId,
-      targetId: toId,
-      type: this.linkType,
-      description: this.linkDescription
-    }));
-    this.api.addNetworkLinks(toCreate).subscribe(() => {
-      this.showLinkModal = false;
-      this.loadData();
-    });
+    const toCreate = Array.from(this.selectedTargetIds).map(toId => ({ sourceId: this.fromDevId, targetId: toId, type: this.linkType, description: this.linkDescription }));
+    this.api.addNetworkLinks(toCreate).subscribe(() => { this.showLinkModal = false; this.loadData(); });
   }
-
   onUpdateLink() {
     if (!this.selectedEdgeData) return;
-    this.api.updateNetworkLink(this.selectedEdgeData.id, { 
-      type: this.editLinkType, 
-      description: this.editLinkDesc 
-    }).subscribe(() => {
-      this.closeSidePanel();
-      this.loadData();
-    });
+    this.api.updateNetworkLink(this.selectedEdgeData.id, { type: this.editLinkType, description: this.editLinkDesc }).subscribe(() => { this.closeSidePanel(); this.loadData(); });
   }
-
   onDeleteLink(id: string) {
-    if (confirm('Удалить эту связь?')) {
-      this.api.deleteNetworkLink(id).subscribe(() => {
-        this.closeSidePanel();
-        this.loadData();
-      });
-    }
+    if (confirm('Удалить эту связь?')) { this.api.deleteNetworkLink(id).subscribe(() => { this.closeSidePanel(); this.loadData(); }); }
   }
 
-  // // --- СИМУЛЯТОР ---
-  // simulateMonitoring() {
-  //   if (!this.cyInstance || this.dashDevices.length === 0) return;
-  //   let changed = false;
-  //   this.dashDevices.forEach(d => {
-  //     const isOnline = d.status === 'online';
-  //     const random = Math.random();
-  //     if (isOnline && random < 0.05) { d.status = 'offline'; changed = true; } 
-  //     else if (!isOnline && random < 0.3) { d.status = 'online'; changed = true; }
-  //   });
-  //   if (changed) {
-  //     this.zone.run(() => {
-  //       this.dashDevices.forEach(d => this.cyInstance?.getElementById(d.id).data('status', d.status));
-  //       this.cdr.detectChanges();
-  //     });
-  //   }
-  // }
-
-  // --- РЕАЛЬНЫЙ МОНИТОРИНГ: ПОЛУЧЕНИЕ АКТУАЛЬНЫХ ДАННЫХ ИЗ БД ---
   fetchRealStatuses() {
     if (!this.cyInstance || this.dashDevices.length === 0) return;
-    
-    // Тихо запрашиваем свежие статусы у базы данных (которую обновляет наш Node.js Poller)
     this.api.getNetworkDevices().subscribe(updatedDevices => {
       let changed = false;
-      
-      // Сверяем текущие устройства на карте с пришедшими из БД
       updatedDevices.forEach(freshDev => {
         const localDev = this.dashDevices.find(d => d.id === freshDev.id);
         if (localDev && localDev.status !== freshDev.status) {
-          localDev.status = freshDev.status; // Обновляем локальную модель
+          localDev.status = freshDev.status;
           changed = true;
         }
       });
-
-      // Если поллер нашел изменения — перекрашиваем графы на лету
       if (changed) {
         this.zone.run(() => {
-          this.dashDevices.forEach(d => {
-            this.cyInstance?.getElementById(d.id).data('status', d.status);
-          });
-          
-          // Если открыта боковая панель с этим устройством, обновляем и ее
+          this.dashDevices.forEach(d => this.cyInstance?.getElementById(d.id).data('status', d.status));
           if (this.selectedDevice) {
             const updated = this.dashDevices.find(d => d.id === this.selectedDevice!.id);
             if (updated) this.selectedDevice.status = updated.status;
           }
-          
           this.cdr.detectChanges();
         });
       }
     });
   }
 
-  // --- ХРАНЕНИЕ ПОЗИЦИЙ ---
-  private getStorageKey(): string { return `nms_pos_${this.activeDashId}`; }
-  private savePositions() {
-    if (!this.cyInstance) return;
-    const pos: any = {};
-    this.cyInstance.nodes().forEach(n => { pos[n.id()] = n.position(); });
-    localStorage.setItem(this.getStorageKey(), JSON.stringify(pos));
-  }
-  resetLayout() { localStorage.removeItem(this.getStorageKey()); this.onDashChange(); }
-
   closeSidePanel() {
     this.selectedType = null;
     this.selectedDevice = null;
+    this.selectedImage = null;
     this.selectedEdgeData = null;
-    if (this.cyInstance) {
-      this.cyInstance.elements().unselect();
-    }
+    if (this.cyInstance) this.cyInstance.elements().unselect();
   }
 
-  // --- РЕНДЕР ГРАФА ---
   renderGraph() {
     if (!this.cyEl) return;
     if (this.cyInstance) { this.cyInstance.destroy(); this.cyInstance = null; }
 
-    const savedPos = JSON.parse(localStorage.getItem(this.getStorageKey()) || 'null');
+    const dash = this.dashboards.find(d => d.id === this.activeDashId);
+    
+    // Формируем Изображения (задний план)
+    const imageNodes = (dash?.images || []).map(img => ({
+      data: {
+        id: img.id,
+        isImage: true,
+        url: img.url,
+        width: (img.width * (img.scale || 1)) + 'px',
+        height: (img.height * (img.scale || 1)) + 'px'
+      },
+      position: { x: img.x || 0, y: img.y || 0 },
+      locked: !!img.locked,
+      selectable: true,
+      grabbable: !img.locked
+    }));
 
-    const nodes = this.dashDevices.map(d => {
-      const node: any = { 
-        data: { 
-          id: d.id, 
-          name: d.name, // Имя остается внизу под квадратом без иконки
-          iconSvg: this.getIconSvg(d.type), // Иконка пойдет ВНУТРЬ квадрата
-          status: d.status, 
-          isCollapsed: false 
-        } 
-      };
-      if (savedPos && savedPos[d.id]) node.position = { x: savedPos[d.id].x, y: savedPos[d.id].y };
-      return node;
-    });
+    // Формируем Оборудование (передний план)
+    const deviceNodes = this.dashDevices.map(d => ({
+      data: { id: d.id, name: d.name, iconSvg: this.getIconSvg(d.type), status: d.status, isCollapsed: false },
+      position: (d.x !== undefined && d.y !== undefined) ? { x: d.x, y: d.y } : undefined,
+      locked: !!d.locked,
+      selectable: true,
+      grabbable: !d.locked
+    }));
 
     const edges = this.dashLinks.map(l => ({
       data: { id: `link_${l.id}`, rawId: l.id, source: l.sourceId, target: l.targetId, label: l.type, description: l.description }
@@ -700,11 +684,50 @@ export class NetworkTopologyComponent implements OnInit, OnDestroy {
 
     this.cyInstance = cytoscape({
       container: this.cyEl.nativeElement,
-      elements: [...nodes, ...edges],
+      elements: [...imageNodes, ...deviceNodes, ...edges],
       wheelSensitivity: 2.0,
       style: [
+        // 1. СТИЛЬ ДЛЯ КАРТИНОК (Z-INDEX 1)
         {
-          selector: 'node',
+          selector: 'node[isImage]',
+          style: {
+            'shape': 'rectangle',
+            'background-image': 'data(url)',
+            'background-fit': 'contain',
+            'width': 'data(width)',
+            'height': 'data(height)',
+            'background-color': 'transparent',
+            'border-width': (ele: any) => ele.selected() ? 3 : 0,
+            'border-color': '#2563eb',
+            'border-style': 'dashed',
+            'z-index': 1,
+            'z-index-compare': 'manual'
+          }
+        },
+        // 2. СТИЛЬ ДЛЯ СВЯЗЕЙ (Z-INDEX 10 — СТРОГО ПОВЕРХ КАРТИНОК!)
+        {
+          selector: 'edge',
+          style: {
+            'width': 3,
+            'line-color': '#2563eb',
+            'target-arrow-color': '#2563eb',
+            'target-arrow-shape': 'triangle',
+            'curve-style': 'bezier',
+            'label': 'data(label)',
+            'font-size': '10px',
+            'font-weight': 'bold',
+            'text-rotation': 'autorotate',
+            'text-background-color': '#ffffff',
+            'text-background-opacity': 0.9,
+            'text-background-padding': '3px',
+            'color': '#1e293b',
+            'z-index': 10,
+            'z-index-compare': 'manual'
+          }
+        },
+        // 3. СТИЛЬ ДЛЯ ОБОРУДОВАНИЯ (Z-INDEX 20 — ПОВЕРХ СВЯЗЕЙ И КАРТИНОК)
+        {
+          selector: 'node[!isImage]',
           style: {
             'shape': 'round-rectangle',
             'label': 'data(name)',
@@ -716,120 +739,126 @@ export class NetworkTopologyComponent implements OnInit, OnDestroy {
             'text-background-color': 'rgba(255,255,255,0.85)',
             'text-background-opacity': 1,
             'background-color': '#ffffff',
-            
-            // ИКОНКА ВНУТРИ КВАДРАТА:
             'background-image': 'data(iconSvg)',
             'background-fit': 'none',
             'background-width': '26px',
             'background-height': '26px',
-            
             'border-width': 4,
             'border-color': (ele: any) => {
               const status = ele.data('status');
-              if (status === 'online') return '#10b981';
-              if (status === 'warning') return '#f59e0b';
-              return '#ef4444';
+              return status === 'online' ? '#10b981' : status === 'warning' ? '#f59e0b' : '#ef4444';
             },
             'width': '46px',
-            'height': '46px'
+            'height': '46px',
+            'z-index': 20,
+            'z-index-compare': 'manual'
           }
         },
-        {
-          selector: 'node.collapsed',
-          style: {
-            'border-style': 'dashed',
-            'border-color': '#8b5cf6'
-          }
-        },
-        {
-          selector: '.hidden',
-          style: {
-            'display': 'none'
-          }
-        },
-        {
-          selector: 'edge',
-          style: {
-            'width': 2,
-            'line-color': '#94a3b8',
-            'target-arrow-color': '#94a3b8',
-            'target-arrow-shape': 'triangle',
-            'curve-style': 'bezier',
-            'label': 'data(label)',
-            'font-size': '9px',
-            'text-rotation': 'autorotate'
-          }
-        }
+        { selector: 'node.collapsed', style: { 'border-style': 'dashed', 'border-color': '#8b5cf6' } },
+        { selector: '.hidden', style: { 'display': 'none' } }
       ],
-      layout: savedPos ? { name: 'preset' } : { name: 'cose', padding: 50 }
+      layout: { name: 'preset' }
     });
 
-    // СИНХРОНИЗАЦИЯ КАМЕРЫ И ФОНА ЗДАНИЯ
-    const syncBackground = () => {
-      if (!this.bgLayer) return;
-      const zoom = this.cyInstance!.zoom();
-      const pan = this.cyInstance!.pan();
-      this.bgLayer.nativeElement.style.transform = `translate(${pan.x}px, ${pan.y}px) scale(${zoom})`;
-    };
+    // --- ЛОГИКА СИНХРОННОГО ПЕРЕМЕЩЕНИЯ (ПРИВЯЗКА ОБОРУДОВАНИЯ К КАРТИНКЕ) ---
+    let dragStartPos = { x: 0, y: 0 };
+    let attachedNodesInitPos = new Map<string, { x: number, y: number }>();
 
-    this.cyInstance.on('pan zoom', syncBackground);
-    syncBackground();
-
-    this.cyInstance.on('dragfree', 'node', () => this.savePositions());
-
-    // ПРАВЫЙ КЛИК ПО УЗЛУ -> СВЕРНУТЬ / РАЗВЕРНУТЬ ДЕРЕВО СВЯЗЕЙ
-    this.cyInstance.on('cxttap', 'node', evt => {
-      const node = evt.target;
-      const isCollapsed = node.hasClass('collapsed');
+    // 1. При захвате картинки запоминаем начальные точки привязанного оборудования
+    this.cyInstance.on('grab', 'node[isImage]', evt => {
+      const imgNode = evt.target;
+      dragStartPos = { ...imgNode.position() };
+      attachedNodesInitPos.clear();
       
-      if (isCollapsed) {
-        node.removeClass('collapsed');
-        node.outgoers().removeClass('hidden'); // Показываем исходящие стрелки и узлы
-      } else {
-        node.addClass('collapsed');
-        node.outgoers().addClass('hidden'); // Прячем исходящие стрелки и узлы
-      }
-    });
-
-    // КЛИК ПО УЗЛУ
-    this.cyInstance.on('tap', 'node', evt => {
-      const id = evt.target.id();
-      this.zone.run(() => {
-        this.selectedType = 'node';
-        this.selectedDevice = this.dashDevices.find(d => d.id === id) || null;
-        this.cdr.detectChanges();
-        setTimeout(() => this.cyInstance?.resize(), 50);
+      const imgId = imgNode.id();
+      this.dashDevices.filter(d => d.attachedImageId === imgId).forEach(d => {
+        const devNode = this.cyInstance?.getElementById(d.id);
+        if (devNode && devNode.length > 0) {
+          attachedNodesInitPos.set(d.id, { ...devNode.position() });
+        }
       });
     });
 
-    // КЛИК ПО ЛИНКУ
+    // 2. В процессе таскания смещаем всё привязанное оборудование синхронно
+    this.cyInstance.on('drag', 'node[isImage]', evt => {
+      const imgNode = evt.target;
+      const curPos = imgNode.position();
+      const dx = curPos.x - dragStartPos.x;
+      const dy = curPos.y - dragStartPos.y;
+
+      attachedNodesInitPos.forEach((initPos, devId) => {
+        const devNode = this.cyInstance?.getElementById(devId);
+        if (devNode && devNode.length > 0) {
+          devNode.position({
+            x: initPos.x + dx,
+            y: initPos.y + dy
+          });
+        }
+      });
+    });
+
+    // 3. При отпускании сохраняем координаты картинки и всех её устройств в БД
+    this.cyInstance.on('dragfree', 'node[isImage]', evt => {
+      const imgNode = evt.target;
+      this.updateNodePositionInDb(imgNode);
+
+      attachedNodesInitPos.forEach((_, devId) => {
+        const devNode = this.cyInstance?.getElementById(devId);
+        if (devNode && devNode.length > 0) {
+          const p = devNode.position();
+          const dev = this.dashDevices.find(d => d.id === devId);
+          if (dev) {
+            dev.x = p.x;
+            dev.y = p.y;
+            this.api.updateNetworkDevice(devId, { x: p.x, y: p.y }).subscribe();
+          }
+        }
+      });
+    });
+
+    // Отдельное перемещение конкретного оборудования
+    this.cyInstance.on('dragfree', 'node[!isImage]', evt => this.updateNodePositionInDb(evt.target));
+
+    this.cyInstance.on('cxttap', 'node[!isImage]', evt => {
+      const node = evt.target;
+      node.hasClass('collapsed') ? (node.removeClass('collapsed'), node.outgoers().removeClass('hidden')) 
+                                 : (node.addClass('collapsed'), node.outgoers().addClass('hidden'));
+    });
+
+    this.cyInstance.on('tap', 'node', evt => {
+      const node = evt.target;
+      const id = node.id();
+      this.zone.run(() => {
+        if (node.data('isImage')) {
+          this.selectedType = 'image';
+          const dsh = this.dashboards.find(d => d.id === this.activeDashId);
+          this.selectedImage = dsh?.images?.find(i => i.id === id) || null;
+        } else {
+          this.selectedType = 'node';
+          this.selectedDevice = this.dashDevices.find(d => d.id === id) || null;
+        }
+        this.cdr.detectChanges();
+      });
+    });
+
     this.cyInstance.on('tap', 'edge', evt => {
       const d = evt.target.data();
       this.zone.run(() => {
         this.selectedType = 'edge';
         const sourceDev = this.dashDevices.find(dev => dev.id === d.source);
         const targetDev = this.dashDevices.find(dev => dev.id === d.target);
-        
-        this.selectedEdgeData = {
-          id: d.rawId,
-          sourceTitle: sourceDev ? sourceDev.name : 'Unknown',
-          targetTitle: targetDev ? targetDev.name : 'Unknown'
-        };
+        this.selectedEdgeData = { id: d.rawId, sourceTitle: sourceDev?.name || 'Unknown', targetTitle: targetDev?.name || 'Unknown' };
         this.editLinkType = d.label;
         this.editLinkDesc = d.description || '';
         this.cdr.detectChanges();
-        setTimeout(() => this.cyInstance?.resize(), 50);
       });
     });
 
     this.cyInstance.on('tap', evt => {
-      if (evt.target === this.cyInstance) {
-        this.zone.run(() => { this.closeSidePanel(); });
-      }
+      if (evt.target === this.cyInstance) this.zone.run(() => this.closeSidePanel());
     });
   }
 
-  // Смена интервала опроса:
   onIntervalChange() {
     if (this.selectedIntervalType === '1s') this.refreshInterval = 1000;
     else if (this.selectedIntervalType === '5s') this.refreshInterval = 5000;
@@ -838,16 +867,12 @@ export class NetworkTopologyComponent implements OnInit, OnDestroy {
     else if (this.selectedIntervalType === '10m') this.refreshInterval = 600000;
     else if (this.selectedIntervalType === 'custom') this.refreshInterval = Math.max(1, this.customIntervalSec) * 1000;
 
-    // СОХРАНЯЕМ И СРАЗУ ПОСЫЛАЕМ forcePoll ДЛЯ МГНОВЕННОГО ПЕРЕКЛЮЧЕНИЯ:
     this.api.updateNetworkSettings({
       pollIntervalMs: this.refreshInterval,
       intervalType: this.selectedIntervalType,
       customSec: this.customIntervalSec,
-      forcePoll: Date.now() // Мгновенный опрос по новому времени!
-    }).subscribe(() => {
-      setTimeout(() => this.fetchRealStatuses(), 1500);
-    });
-
+      forcePoll: Date.now()
+    }).subscribe(() => setTimeout(() => this.fetchRealStatuses(), 1500));
     this.restartPollingTimer();
   }
 
@@ -856,25 +881,12 @@ export class NetworkTopologyComponent implements OnInit, OnDestroy {
     this.pollingTimer = setInterval(() => this.fetchRealStatuses(), this.refreshInterval);
   }
 
-  // Ручное обновление по кнопке:
   manualRefresh() {
     this.isRefreshing = true;
     this.cdr.detectChanges();
-
-    // 1. Посылаем сигнал в БД: "Немедленно разбудить поллер!"
     this.api.updateNetworkSettings({ forcePoll: Date.now() }).subscribe({
-      next: () => {
-        // 2. Даем поллеру 1.5 секунды завершить физический пинг и забираем свежие статусы
-        setTimeout(() => {
-          this.fetchRealStatuses();
-          this.isRefreshing = false;
-          this.cdr.detectChanges();
-        }, 1500);
-      },
-      error: () => {
-        this.isRefreshing = false;
-        this.cdr.detectChanges();
-      }
+      next: () => setTimeout(() => { this.fetchRealStatuses(); this.isRefreshing = false; this.cdr.detectChanges(); }, 1500),
+      error: () => { this.isRefreshing = false; this.cdr.detectChanges(); }
     });
   }
 }
